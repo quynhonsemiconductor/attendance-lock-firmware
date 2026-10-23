@@ -1,0 +1,110 @@
+# =============================================================================
+# ci — build both firmware profiles in the pinned ESP-IDF container, run the
+# host unit tests, and report image size (ADR §2.8, work item 6).
+#
+# Shared gates from `ci` (gitleaks/Semgrep, PR title, workflow security) live
+# in security.yml / pr-title.yml — this file only carries what is
+# firmware-specific. The container is pinned BY DIGEST: a moving `:v6.0` tag
+# would let Espressif change the toolchain under a green build.
+# =============================================================================
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build-${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, prod]
+    container:
+      # espressif/idf:v6.0 pinned BY DIGEST (ESP-IDF v6.0.x; v6.1 is beta, ADR §2.8)
+      image: espressif/idf@sha256:59df146f64aa0b13886a13a74682ad157482b446f5cc16582500803c95c71401
+    steps:
+      # The IDF container has git but no Node, so actions/checkout cannot run
+      # inside it; clone directly. For PRs GitHub exposes the merge commit via
+      # refs/pull/N/merge. The token goes in through a credential file written
+      # on stdin, never an argv URL.
+      - name: Clone
+        env:
+          TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR" ]; then REF="refs/pull/$PR/merge"; fi
+          git config --global --add safe.directory '*'
+          git init "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          printf 'machine %s\n  login x-access-token\n  password %s\n' \
+            "${GITHUB_SERVER_URL#https://}" "$TOKEN" > "$HOME/.netrc"
+          chmod 600 "$HOME/.netrc"
+          git -C "$GITHUB_WORKSPACE" fetch --depth=1 origin "$REF"
+          git -C "$GITHUB_WORKSPACE" checkout FETCH_HEAD
+          rm -f "$HOME/.netrc"
+
+      - name: Build (${{ matrix.profile }} profile)
+        id: build
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.$PROFILE" build
+          echo "sdkconfig=$GITHUB_WORKSPACE/build/sdkconfig" >> "$GITHUB_OUTPUT"
+
+      # The prod build must prove its hardening, not just compile (ADR §2.8).
+      # grep over the RESOLVED sdkconfig: catches a typo'd Kconfig symbol that
+      # would otherwise be silently dropped from sdkconfig.defaults.prod.
+      - name: Assert prod hardening landed
+        if: matrix.profile == 'prod'
+        run: |
+          set -euo pipefail
+          missing=0
+          for opt in CONFIG_SECURE_BOOT=y CONFIG_SECURE_FLASH_ENC_ENABLED=y \
+                     CONFIG_SECURE_DISABLE_ROM_DL_MODE=y CONFIG_SECURE_DISABLE_JTAG=y \
+                     CONFIG_NVS_ENCRYPTION=y CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y; do
+            grep -qx "$opt" build/sdkconfig || { echo "::error::prod sdkconfig lost $opt"; missing=1; }
+          done
+          exit $missing
+
+      - name: Size report
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          idf_size.py build/attendance_lock.map --json --output size-report.json
+          idf_size.py build/attendance_lock.map --archives
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: size-${{ matrix.profile }}
+          path: size-report.json
+          retention-days: 30
+
+  host-tests:
+    name: host-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { persist-credentials: false }
+
+      - name: Configure, build, run
+        run: |
+          set -euo pipefail
+          cmake -S tests/host -B build-host
+          cmake --build build-host
+          ctest --test-dir build-host --output-on-failure

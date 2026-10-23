@@ -1,0 +1,28 @@
+# `prod` profile hardening — ADR §2.8. This profile is what makes
+# "stealing the token needs a flash read-out" true.
+#
+# ⚠ IRREVERSIBLE: several options below BURN eFuses. eFuse writes can never be
+# undone — a chip flashed with this profile cannot be un-hardened or re-flashed
+# without signed images. Burn only on production terminals, only with the
+# prod profile, and keep the signing/encryption keys offline.
+#
+# Secure Boot v2 (release: signed images required, no debug verification)
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+
+# Flash encryption, RELEASE mode (release = no "only image length" shortcut)
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPT_ONLY_IMAGE_LEN_IN_APP_PARTITION=n
+
+# ROM download mode SECURE, JTAG and USB-Serial-JTAG disabled (eFuse, permanent)
+CONFIG_SECURE_DISABLE_ROM_DL_MODE=y
+CONFIG_SECURE_DISABLE_JTAG=y
+
+# NVS encryption with the HMAC-based scheme — the key lives in an eFuse
+# (HMAC_KEY), there is deliberately NO nvs_keys partition (partitions.csv)
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y
+
+# Serial console is provisioning-only (§2.8): it can SET the base URL and
+# token and print status; the firmware (not the config) enforces that it can
+# never read the token back. Enforced in components/provision.

@@ -1,0 +1,25 @@
+# ADR §2.8 (ATTENDANCE-DEVICE.md) — terminal firmware profile defaults.
+# Common to dev and prod. Profile-specific hardening lives in
+# sdkconfig.defaults.{dev,prod}; CI passes
+#   SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.<profile>"
+#
+# Target
+CONFIG_IDF_TARGET="esp32s3"
+
+# Partition table + flash size (partitions.csv: two OTA slots + event ring;
+# 16 MB module assumed — change both together if the module differs)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Fail-secure watchdog (§2.8: a hung firmware resets into "locked")
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# FreeRTOS tick / logging kept quiet for a headless appliance
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# The event ring lives in its own encrypted partition (partitions.csv),
+# not in NVS; NVS holds the allow-list cache and the sync cursor.

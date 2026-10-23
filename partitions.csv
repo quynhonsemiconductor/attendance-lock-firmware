@@ -1,0 +1,16 @@
+# ADR §2.8 — OTA-ready from day one: two app slots, no `factory` app.
+# The event ring is a DEDICATED encrypted data partition (subtype 0x40,
+# "custom"), not NVS: sized ≥ 90 days of one door (~10–20k events), used as a
+# ring — when full the door keeps working, drops and counts events (§2.4).
+#
+# ⚠ `encrypted` on nvs_keys/event_ring only takes effect with flash encryption
+# enabled (prod profile). Offsets: let the generator place anything after
+# otadata; the explicit start for ota_0 keeps both app slots 4 MiB-aligned.
+#
+# Name,       Type, SubType, Offset,   Size,   Flags
+nvs,          data, nvs,     0x9000,   0x6000,
+phy_init,     data, phy,     0xf000,   0x1000,
+otadata,      data, ota,     0x10000,  0x2000,
+ota_0,        app,  ota_0,   0x20000,  0x320000,
+ota_1,        app,  ota_1,   ,         0x320000,
+event_ring,   data, 0x40,    ,         0x400000, encrypted

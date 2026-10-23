@@ -1,0 +1,43 @@
+# =============================================================================
+# security — shared gates from `ci`: zizmor/actionlint over the workflows,
+# gitleaks + osv-scanner + Semgrep. Thin caller, SHA-pinned (ci's v1 tag
+# moves on every merge). No container scan: the firmware image build has no
+# container artifact; the toolchain pin is the digest in ci.yml.
+# =============================================================================
+name: Security · Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'   # weekly, Monday
+
+concurrency:
+  group: security-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && format('main-{0}', github.sha) || format('{0}-{1}', github.event_name, github.run_id)) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  actions-security:
+    permissions:
+      contents: read
+      security-events: write
+    uses: quynhonsemiconductor/ci/.github/workflows/actions-security.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+    with:
+      blocking: true
+      combine: true # actionlint + zizmor as ONE job: `actions-security / Workflow security (actionlint, zizmor)`
+
+  security:
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@691668f7a1bd4f4a3416f9224ae7ff7ebe831a3a # v1.23.0
+    with:
+      product: attendance-lock
+      combine: true # one job: `security / Security scans (Gitleaks, osv-scanner, Semgrep)`
+      scan_container: false
+      osv_blocking: true
