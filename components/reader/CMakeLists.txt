@@ -1,2 +1,2 @@
-idf_component_register(SRCS "reader.c"
+idf_component_register(SRCS "reader.c" \
                        INCLUDES "include")

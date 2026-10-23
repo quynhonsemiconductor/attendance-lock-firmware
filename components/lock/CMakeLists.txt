@@ -1,2 +1,2 @@
-idf_component_register(SRCS "lock.c"
+idf_component_register(SRCS "lock.c" \
                        INCLUDES "include")
