@@ -47,6 +47,9 @@
  *   enroll [ten] bat/tat CHE DO DANG KY 1 CHAM: quet the moi -> tu luu voi [ten] (khong mo cua),
  *                tu tat sau khi them xong / 60s. Tren web: nut "Dang ky the moi"
  *   ip           in dia chi IP
+ *   wifi         trang thai WiFi: song, IP, thoi gian mat mang, ly do, so su kien cho gui
+ *   wifi scan    quet mang 2.4 GHz xung quanh (tim nguyen nhan khong vao duoc WiFi)
+ *   wifi off|on  gia lap mat mang / ket noi lai (test gui bu su kien)
  */
 
 #include <SPI.h>
@@ -97,6 +100,7 @@ struct LogEntry {
   char     uid[32];
   char     name[24];
   char     result[12];   // granted / denied / lowbat / ...
+  uint32_t offlineSec;   // chi su kien wifi_up: so giay vua mat mang (0 = khong ap dung)
   bool     sent;         // da gui len LOG_SERVER_URL chua
 };
 
@@ -116,6 +120,15 @@ int       logHead = 0;     // vi tri ghi tiep theo
 int       logCount = 0;
 
 bool      verbose = false;
+
+// Theo doi WiFi (ghi trong callback su kien -> chi doc/in trong loop)
+volatile bool     wifiUp = false;
+volatile bool     wifiChanged = false;
+volatile uint8_t  wifiLastReason = 0;   // ly do mat ket noi gan nhat (wifi_err_reason_t)
+volatile uint32_t wifiDownAtMs = 0;     // millis() luc mat mang (0 = chua tung mat)
+volatile uint32_t wifiUpAtMs = 0;       // millis() luc co IP gan nhat
+volatile uint16_t wifiDropCount = 0;
+bool      wifiManualOff = false;        // lenh "wifi off" (gia lap mat mang)
 
 // Trang thai khoa
 bool      doorLocked = true;
@@ -355,9 +368,18 @@ String formatTime(time_t ts, uint32_t upSec) {
 //  Log + gui server ngoai
 // =====================================================================
 void addLog(const char *type, const String &uid, const char *name, const char *result) {
+  addLogAt(type, uid, name, result, millis(), 0);
+}
+
+// Ghi su kien xay ra tai thoi diem atMs (millis) - dung cho moc mat / co mang lai,
+// vi su kien WiFi duoc xu ly trong loop sau khi da xay ra.
+void addLogAt(const char *type, const String &uid, const char *name, const char *result,
+              uint32_t atMs, uint32_t offlineSec) {
   LogEntry &e = logs[logHead];
-  e.ts = timeValid() ? time(nullptr) : 0;
-  e.upSec = millis() / 1000;
+  uint32_t agoSec = (millis() - atMs) / 1000;
+  e.ts = timeValid() ? time(nullptr) - (time_t)agoSec : 0;
+  e.upSec = atMs / 1000;
+  e.offlineSec = offlineSec;
   strlcpy(e.type, type, sizeof(e.type));
   strlcpy(e.uid, uid.c_str(), sizeof(e.uid));
   strlcpy(e.name, name, sizeof(e.name));
@@ -377,7 +399,15 @@ String logToJson(const LogEntry &e) {
   String s = "{\"device\":\"" DEVICE_ID "\",\"time\":\"" + formatTime(e.ts, e.upSec) +
              "\",\"ts\":" + String((uint32_t)e.ts) +
              ",\"type\":\"" + e.type + "\",\"uid\":\"" + e.uid +
-             "\",\"name\":\"" + e.name + "\",\"result\":\"" + e.result + "\"}";
+             "\",\"name\":\"" + e.name + "\",\"result\":\"" + e.result + "\"";
+  if (e.offlineSec) {   // wifi_up: kem luc mat mang + luc co mang lai de web hien ro khoang mat mang
+    time_t lostTs = e.ts ? e.ts - (time_t)e.offlineSec : 0;
+    s += ",\"lost_at\":\"" + formatTime(lostTs, e.upSec - e.offlineSec) +
+         "\",\"lost_ts\":" + String((uint32_t)lostTs) +
+         ",\"connected_at\":\"" + formatTime(e.ts, e.upSec) +
+         "\",\"offline_sec\":" + String(e.offlineSec);
+  }
+  s += "}";
   return s;
 }
 
@@ -385,6 +415,8 @@ String logToJson(const LogEntry &e) {
 void updateUploader() {
   if (strlen(LOG_SERVER_URL) == 0) return;
   if (WiFi.status() != WL_CONNECTED) return;
+  // Vua co mang lai: cho NTP bu gio that cho su kien luc mat mang (toi da 30s) roi moi gui
+  if (!timeValid() && millis() - wifiUpAtMs < 30000) return;
   if ((int32_t)(millis() - nextSendTryMs) < 0) return;
 
   for (int i = 0; i < logCount; i++) {
@@ -1034,7 +1066,135 @@ void setupWeb() {
   server.begin();
 }
 
+// ---------------- Theo doi WiFi ----------------
+void onWiFiEvent(WiFiEvent_t ev, WiFiEventInfo_t info) {
+  if (ev == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    wifiUp = true;
+    wifiUpAtMs = millis();
+    wifiChanged = true;
+  } else if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    wifiLastReason = info.wifi_sta_disconnected.reason;
+    if (wifiUp) {                 // su kien nay lap lai moi lan thu ket noi -> chi tinh lan dau
+      wifiUp = false;
+      wifiDownAtMs = millis();
+      wifiDropCount++;
+      wifiChanged = true;
+    }
+  }
+}
+
+// Su kien tao luc chua co gio that (khoi dong khi mat mang) chi co upSec.
+// Khi NTP dong bo xong: gio that = bay gio - (uptime hien tai - upSec cua su kien).
+void backfillLogTimes() {
+  time_t now = time(nullptr);
+  uint32_t up = millis() / 1000;
+  int n = 0;
+  for (int i = 0; i < logCount; i++) {
+    LogEntry &e = logs[logIndex(i)];
+    if (e.ts == 0) { e.ts = now - (time_t)(up - e.upSec); n++; }
+  }
+  Serial.printf("[TIME] Da dong bo gio: %s", formatTime(now, up).c_str());
+  if (n) Serial.printf(" -> bo sung gio that cho %d su kien luc mat mang", n);
+  Serial.println();
+}
+
+int pendingLogCount() {
+  int n = 0;
+  for (int i = 0; i < logCount; i++) if (!logs[logIndex(i)].sent) n++;
+  return n;
+}
+
+void updateWiFiMonitor() {
+  static bool timeSynced = false;
+  if (!timeSynced && timeValid()) { timeSynced = true; backfillLogTimes(); }
+
+  if (!wifiChanged) return;
+  wifiChanged = false;
+  if (wifiUp) {
+    // Lan dau co mang sau khi khoi dong: khong co khoang mat mang de bao
+    uint32_t offSec = wifiDownAtMs ? (wifiUpAtMs - wifiDownAtMs) / 1000 : 0;
+    char note[24] = "";
+    if (offSec) snprintf(note, sizeof(note), "mat mang %lus", (unsigned long)offSec);
+    Serial.printf("[WIFI] Co mang, IP %s%s%s, con %d su kien cho gui\n",
+                  WiFi.localIP().toString().c_str(), offSec ? " - " : "", note, pendingLogCount());
+    addLogAt("system", "", note, "wifi_up", wifiUpAtMs, offSec);
+  } else {
+    Serial.printf("[WIFI] MAT KET NOI (ly do %u: %s)\n", wifiLastReason,
+                  WiFi.disconnectReasonName((wifi_err_reason_t)wifiLastReason));
+    addLogAt("system", "", "", "wifi_down", wifiDownAtMs, 0);   // moc thoi gian mat mang
+  }
+}
+
+const char *authName(wifi_auth_mode_t a) {
+  switch (a) {
+    case WIFI_AUTH_OPEN:          return "OPEN";
+    case WIFI_AUTH_WEP:           return "WEP";
+    case WIFI_AUTH_WPA_PSK:       return "WPA";
+    case WIFI_AUTH_WPA2_PSK:      return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA/WPA2";
+    case WIFI_AUTH_WPA3_PSK:      return "WPA3";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+    default:                      return "khac";
+  }
+}
+
+// Lenh "wifi [scan|off|on]"
+void wifiCommand(const String &arg) {
+  if (arg == "scan") {
+    Serial.println("Dang quet (ESP32 chi thay mang 2.4 GHz)...");
+    int n = WiFi.scanNetworks();
+    for (int i = 0; i < n; i++)
+      Serial.printf("  %-28s kenh %2d  %4d dBm  %s%s\n", WiFi.SSID(i).c_str(), WiFi.channel(i),
+                    WiFi.RSSI(i), authName(WiFi.encryptionType(i)),
+                    WiFi.SSID(i) == WIFI_SSID ? "   <- WIFI_SSID" : "");
+    Serial.printf("Tong %d mang. Khong thay \"%s\" -> mang dang phat 5 GHz / an / sai ten\n", n, WIFI_SSID);
+    WiFi.scanDelete();
+    return;
+  }
+  if (arg == "off") {             // gia lap mat mang: ngat va khong tu ket noi lai
+    wifiManualOff = true;
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect();
+    Serial.println("[WIFI] Da ngat (gia lap mat mang). Go \"wifi on\" de ket noi lai");
+    return;
+  }
+  if (arg == "on") {
+    wifiManualOff = false;
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    Serial.printf("[WIFI] Dang ket noi lai \"%s\"...\n", WIFI_SSID);
+    return;
+  }
+
+  bool up = WiFi.status() == WL_CONNECTED;
+  Serial.println("=== WIFI ===");
+  Serial.printf("Trang thai : %s\n", up ? "CO MANG" : wifiManualOff ? "NGAT THU CONG (wifi off)"
+                                       : wifiDownAtMs ? "MAT MANG" : "CHUA KET NOI LAN NAO");
+  Serial.printf("SSID       : \"%s\"\n", WIFI_SSID);
+  if (up) {
+    Serial.printf("IP         : %s  (gateway %s)\n", WiFi.localIP().toString().c_str(),
+                  WiFi.gatewayIP().toString().c_str());
+    Serial.printf("Song       : %d dBm, kenh %d  (> -70 dBm la on)\n", WiFi.RSSI(), WiFi.channel());
+    Serial.printf("Da co mang : %lus\n", (unsigned long)((millis() - wifiUpAtMs) / 1000));
+  } else {
+    if (wifiDownAtMs) Serial.printf("Da mat     : %lus\n", (unsigned long)((millis() - wifiDownAtMs) / 1000));
+    if (wifiLastReason)
+      Serial.printf("Ly do      : %u (%s)\n", wifiLastReason,
+                    WiFi.disconnectReasonName((wifi_err_reason_t)wifiLastReason));
+  }
+  Serial.printf("So lan mat : %u\n", wifiDropCount);
+  if (WiFi.getMode() & WIFI_AP)
+    Serial.printf("AP du phong: \"%s\" %s, %d thiet bi\n", AP_SSID,
+                  WiFi.softAPIP().toString().c_str(), WiFi.softAPgetStationNum());
+  Serial.printf("Gio        : %s%s\n", formatTime(timeValid() ? time(nullptr) : 0, millis() / 1000).c_str(),
+                timeValid() ? "" : "  (CHUA dong bo NTP)");
+  Serial.printf("Hang cho   : %d/%d su kien chua gui -> %s\n", pendingLogCount(), logCount,
+                strlen(LOG_SERVER_URL) ? LOG_SERVER_URL : "(chua cau hinh LOG_SERVER_URL)");
+  Serial.println("  wifi scan | wifi off | wifi on");
+}
+
 void setupWiFi() {
+  WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
   WiFi.setAutoReconnect(true);
@@ -1100,6 +1260,7 @@ void runCommand(String line) {
   }
   else if (cmd == "rid") { setReadMode(!readMode); }
   else if (cmd == "enroll") { setEnrollMode(!enrollMode, arg); }
+  else if (cmd == "wifi") { arg.toLowerCase(); wifiCommand(arg); }
   else if (cmd == "ip") {
     Serial.printf("STA: %s  AP: %s\n", WiFi.localIP().toString().c_str(), WiFi.softAPIP().toString().c_str());
   }
@@ -1180,6 +1341,7 @@ void loop() {
   updateDoor();
   updateReadMode();
   updateBattery(false);
+  updateWiFiMonitor();
   updateUploader();
   delay(10);
 }
