@@ -1,0 +1,16 @@
+# Secrets — KHONG commit
+secrets.h
+
+# Builds
+build/
+.build/
+.pio/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# Arduino / IDE
+.vscode/
+.idea/
+*.code-workspace

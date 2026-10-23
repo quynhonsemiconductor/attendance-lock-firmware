@@ -4,7 +4,7 @@
  *   - Servo MG996R keo/day chot qua banh rang - thanh rang
  *   - Buzzer bao the dung / sai
  *   - Pin < 20% -> thu chot (mo cua) de khong nhot nguoi ben trong
- *   - Web quan tri: them/xoa the, xem lich su checkin/checkout, mo cua tu xa
+ *   - Web quan tri: them/xoa the, xem lich su checkin/checkout
  *   - (tuy chon) POST tung su kien len server ngoai (LOG_SERVER_URL trong config.h)
  *
  * Board: ESP32S3 Dev Module, core esp32 >= 3.0 (da thu voi 3.3.x)
@@ -961,12 +961,14 @@ void handleStatus() {
 
 void handleReadMode() {
   if (!requireAuth()) return;
+  if (!csrfOk()) { server.send(403, "text/plain", "Forbidden"); return; }
   setReadMode(server.arg("on") == "1");
   server.send(200, "text/plain", "OK");
 }
 
 void handleEnroll() {
   if (!requireAuth()) return;
+  if (!csrfOk()) { server.send(403, "text/plain", "Forbidden"); return; }
   bool on = server.arg("on") == "1";
   if (on && cardCount >= MAX_CARDS) {
     server.send(400, "text/plain; charset=utf-8", "Danh sach day");
@@ -989,6 +991,7 @@ void handleCardsGet() {
 
 void handleCardsAdd() {
   if (!requireAuth()) return;
+  if (!csrfOk()) { server.send(403, "text/plain", "Forbidden"); return; }
   String err = addCard(server.arg("uid"), server.arg("name"));
   if (err.isEmpty()) server.send(200, "text/plain", "OK");
   else server.send(400, "text/plain; charset=utf-8", err);
@@ -996,6 +999,7 @@ void handleCardsAdd() {
 
 void handleCardsDelete() {
   if (!requireAuth()) return;
+  if (!csrfOk()) { server.send(403, "text/plain", "Forbidden"); return; }
   String err = deleteCard(server.arg("uid"));
   if (err.isEmpty()) server.send(200, "text/plain", "OK");
   else server.send(404, "text/plain; charset=utf-8", err);
@@ -1012,12 +1016,16 @@ void handleLogs() {
   server.send(200, "application/json", s);
 }
 
-void handleUnlock() {
-  if (!requireAuth()) return;
-  addLog("system", "", "web", "remote_open");
-  beep(BEEP_GRANTED);
-  if (!lowBattery) unlockDoor(UNLOCK_HOLD_MS);
-  server.send(200, "text/plain", "OK");
+// Kiem tra Origin/Host (CSRF): tu choi POST khi co header Origin nhung khac Host.
+// Dung cho cac route POST con lai (them/xoa the, readmode, enroll).
+bool csrfOk() {
+  if (!server.hasHeader("Origin")) return true;   // khong co Origin (vd curl) -> de auth basic quan ly
+  String origin = server.header("Origin");
+  int p = origin.indexOf("://");
+  String oHost = (p >= 0) ? origin.substring(p + 3) : origin;
+  int slash = oHost.indexOf('/');
+  if (slash >= 0) oHost = oHost.substring(0, slash);
+  return oHost == server.hostHeader();
 }
 
 void setupWeb() {
@@ -1027,10 +1035,12 @@ void setupWeb() {
   server.on("/api/cards",   HTTP_POST, handleCardsAdd);
   server.on("/api/delete",  HTTP_POST, handleCardsDelete);
   server.on("/api/logs",    HTTP_GET,  handleLogs);
-  server.on("/api/unlock",  HTTP_POST, handleUnlock);
   server.on("/api/readmode", HTTP_POST, handleReadMode);
   server.on("/api/enroll",  HTTP_POST, handleEnroll);
   server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
+  // WebServer chi doc header da khai bao collect — can Origin cho kiem tra CSRF.
+  const char* csrfHeaders[] = {"Origin"};
+  server.collectHeaders(csrfHeaders, 1);
   server.begin();
 }
 
@@ -1050,11 +1060,16 @@ void setupWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("WiFi OK, IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    // Van tiep tuc thu STA o nen, dong thoi mo AP de vao web cau hinh
+    // Van tiep tuc thu STA o nen; AP du phong CHI bat khi AP_PASS la mat khau that
+#if AP_FALLBACK_ENABLED
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(AP_SSID, AP_PASS);
     Serial.printf("Khong vao duoc WiFi -> AP \"%s\", IP: %s\n",
                   AP_SSID, WiFi.softAPIP().toString().c_str());
+#else
+    WiFi.mode(WIFI_STA);
+    Serial.println("Khong vao duoc WiFi -> AP du phong TAT (AP_PASS van la placeholder)");
+#endif
   }
   configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
   if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
