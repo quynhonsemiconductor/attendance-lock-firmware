@@ -33,6 +33,11 @@ jobs:
     container:
       # espressif/idf:v6.0 pinned BY DIGEST (ESP-IDF v6.0.x; v6.1 is beta, ADR §2.8)
       image: espressif/idf@sha256:59df146f64aa0b13886a13a74682ad157482b446f5cc16582500803c95c71401
+    # The image's default shell is dash, which rejects `set -o pipefail`
+    # (first CI run: every step died at line 1). Pin bash.
+    defaults:
+      run:
+        shell: bash
     steps:
       # The IDF container has git but no Node, so actions/checkout cannot run
       # inside it; clone directly. For PRs GitHub exposes the merge commit via
