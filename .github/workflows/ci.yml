@@ -93,7 +93,9 @@ jobs:
           bad=0
           for opt in 'CONFIG_SECURE_BOOT=y' 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' \
                      'CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y' 'CONFIG_NVS_ENCRYPTION=y'; do
-            grep -qx "$opt" "$cfg" && { echo "::error::dev sdkconfig gained $opt"; bad=1; } || true
+            if grep -qx "$opt" "$cfg"; then
+              echo "::error::dev sdkconfig gained $opt"; bad=1
+            fi
           done
           exit $bad
 
