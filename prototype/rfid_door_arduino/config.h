@@ -3,24 +3,35 @@
 //  CAU HINH - sua file nay truoc khi nap
 // =====================================================================
 
-// ---------------- WiFi ----------------
-// WIFI_SSID, WIFI_PASS, AP_PASS nam trong secrets.h (KHONG commit).
+// ---------------- WiFi + mat khau (KHONG co gia tri mac dinh) ----------------
+// WIFI_SSID, WIFI_PASS, WEB_USER, WEB_PASS, AP_PASS deu nam trong secrets.h (KHONG commit).
 // Lan dau: copy secrets.example.h -> secrets.h roi dien thong tin that.
+// Thieu secrets.h, hoac de WEB_USER/WEB_PASS/AP_PASS rong thi build that bai.
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
-#warning "Chua co secrets.h -> dung WiFi gia, chi chay AP du phong"
-#define WIFI_SSID       "your-wifi-ssid"
-#define WIFI_PASS       "your-wifi-pass"
-#define AP_PASS         "change-me-123"  // >= 8 ky tu
+#error "Thieu secrets.h - copy secrets.example.h thanh secrets.h roi dien thong tin that"
 #endif
+
+#if !defined(WEB_USER) || !defined(WEB_PASS) || !defined(AP_PASS)
+#error "secrets.h thieu WEB_USER / WEB_PASS / AP_PASS"
+#endif
+
+// WEB_USER phai co ten; WEB_PASS phai >= 12 ky tu (khoa web quan tri la lop phong
+// thu duy nhat cua prototype). Khong dat du se KHONG build duoc - chu khong chay voi
+// mat khau mac dinh.
+static_assert(sizeof(WEB_USER) > 1, "WEB_USER rong - dat ten dang nhap web trong secrets.h");
+static_assert(sizeof(WEB_PASS) - 1 >= 12, "WEB_PASS qua ngan - can >= 12 ky tu trong secrets.h");
+static_assert(sizeof(AP_PASS) == 1 || sizeof(AP_PASS) - 1 >= 8,
+              "AP_PASS rong (TAT AP) hoac >= 8 ky tu - sua trong secrets.h");
+
+// AP du phong CHI bat khi AP_PASS co mat khau that (>= 8 ky tu). AP_PASS rong =
+// khong bao gio mo AP (thiet bi chi dung qua WiFi chinh).
+constexpr bool kApFallbackEnabled = sizeof(AP_PASS) - 1 >= 8;
+
 #define WIFI_TIMEOUT_MS 10000           // khong vao duoc WiFi sau 10s -> bat them AP du phong
 #define AP_SSID         "RFID-DOOR"     // AP du phong: vao http://192.168.4.1
 #define HOSTNAME        "rfid-door"     // http://rfid-door.local (mDNS)
-
-// ---------------- Web quan tri (Basic Auth) ----------------
-#define WEB_USER        "admin"
-#define WEB_PASS        "admin123"      // DOI MAT KHAU NAY
 
 // ---------------- Gui su kien len server ngoai (tuy chon) ----------------
 // De trong "" neu chi dung web tren ESP32. Vd: "http://192.168.1.10:3000/api/events"

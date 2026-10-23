@@ -37,7 +37,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
    <div><div class="k">Thoi gian</div><div class="v" id="time" style="font-size:14px">-</div></div>
    <div><div class="k">IP</div><div class="v" id="ip" style="font-size:14px">-</div></div>
   </div>
-  <p><button onclick="post('/api/unlock')">Mo cua tu xa</button></p>
  </div>
 
  <div class="card"><h2>Them the</h2>
