@@ -1020,12 +1020,14 @@ void handleLogs() {
 // Dung cho cac route POST con lai (them/xoa the, readmode, enroll).
 bool csrfOk() {
   if (!server.hasHeader("Origin")) return true;   // khong co Origin (vd curl) -> de auth basic quan ly
+  String host = server.hostHeader();
+  if (host.isEmpty()) return false;               // khong co Host -> khong the xac thuc goc
   String origin = server.header("Origin");
   int p = origin.indexOf("://");
   String oHost = (p >= 0) ? origin.substring(p + 3) : origin;
   int slash = oHost.indexOf('/');
   if (slash >= 0) oHost = oHost.substring(0, slash);
-  return oHost == server.hostHeader();
+  return oHost.equalsIgnoreCase(host);
 }
 
 void setupWeb() {
@@ -1060,16 +1062,16 @@ void setupWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("WiFi OK, IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    // Van tiep tuc thu STA o nen; AP du phong CHI bat khi AP_PASS la mat khau that
-#if AP_FALLBACK_ENABLED
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(AP_SSID, AP_PASS);
-    Serial.printf("Khong vao duoc WiFi -> AP \"%s\", IP: %s\n",
-                  AP_SSID, WiFi.softAPIP().toString().c_str());
-#else
-    WiFi.mode(WIFI_STA);
-    Serial.println("Khong vao duoc WiFi -> AP du phong TAT (AP_PASS van la placeholder)");
-#endif
+    // Van tiep tuc thu STA o nen; AP du phong CHI bat khi AP_PASS co mat khau that
+    if (kApFallbackEnabled) {
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.softAP(AP_SSID, AP_PASS);
+      Serial.printf("Khong vao duoc WiFi -> AP \"%s\", IP: %s\n",
+                    AP_SSID, WiFi.softAPIP().toString().c_str());
+    } else {
+      WiFi.mode(WIFI_STA);
+      Serial.println("Khong vao duoc WiFi -> AP du phong TAT (AP_PASS rong trong secrets.h)");
+    }
   }
   configTzTime(TZ_INFO, NTP_SERVER_1, NTP_SERVER_2);
   if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
