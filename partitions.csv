@@ -3,14 +3,15 @@
 # "custom"), not NVS: sized ≥ 90 days of one door (~10–20k events), used as a
 # ring — when full the door keeps working, drops and counts events (§2.4).
 #
-# Offsets are left to the generator; the table starts at 0x10000
+# The CSV is positional: the Offset column stays BLANK and the generator
+# places everything; the table lives at 0x10000
 # (CONFIG_PARTITION_TABLE_OFFSET). Requires the 16 MB (N16) module — see
 # sdkconfig.defaults.
 #
-# Name,       Type, SubType, Size,     Flags
-nvs,          data, nvs,     0x6000,
-phy_init,     data, phy,     0x1000,
-otadata,      data, ota,     0x2000,
-ota_0,        app,  ota_0,   0x320000,
-ota_1,        app,  ota_1,   0x320000,
-event_ring,   data, 0x40,    0x400000, encrypted
+# Name,       Type, SubType, Offset, Size,     Flags
+nvs,          data, nvs,     ,       0x6000,
+phy_init,     data, phy,     ,       0x1000,
+otadata,      data, ota,     ,       0x2000,
+ota_0,        app,  ota_0,   ,       0x320000,
+ota_1,        app,  ota_1,   ,       0x320000,
+event_ring,   data, 0x40,    ,       0x400000, encrypted

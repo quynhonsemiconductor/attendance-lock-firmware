@@ -24,4 +24,3 @@ void app_main(void)
     // poll/buffer/upload tasks and the serial provisioning console loop.
     // No busy loop: app_main returns and the idle tasks feed the watchdog.
 }
-}

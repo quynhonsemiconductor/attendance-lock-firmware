@@ -5,10 +5,6 @@ void lock_init(void) {
     // no-op in the scaffold
 }
 
-void lock_init(void) {
-    // no-op in the scaffold
-}
-
 void lock_engage(void) {
     // no-op in the scaffold
 }

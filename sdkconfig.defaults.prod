@@ -16,6 +16,9 @@ CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
 # the image; release does not)
 CONFIG_SECURE_FLASH_ENC_ENABLED=y
 CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+# AES-128 on purpose: AES-256 needs TWO key blocks and would collide with
+# BLOCK_KEY2 (the NVS HMAC key) — see the block plan in docs/PROVISIONING.md.
+CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y
 
 # ROM download mode SECURE (permanent eFuse; DISABLE would brick reflashing).
 # JTAG: there is no Kconfig switch — Secure Boot v2 revokes JTAG via

@@ -34,6 +34,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      packages: read
     uses: quynhonsemiconductor/ci/.github/workflows/security.yml@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
     with:
       product: attendance-lock
