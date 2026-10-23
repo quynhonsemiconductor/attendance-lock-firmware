@@ -12,6 +12,7 @@ void app_main(void)
     // Fail-secure order: the lock comes up FIRST, before anything that could
     // block or crash. A hung boot or a watchdog reset lands here again —
     // locked (§2.8: boots locked).
+    lock_init();
     lock_engage();
 
     provision_init();
@@ -21,7 +22,6 @@ void app_main(void)
 
     // Scaffold: nothing else runs yet. Firmware v1 (work item 7) adds the
     // poll/buffer/upload tasks and the serial provisioning console loop.
-    for (;;) {
-        // Idle with the watchdog fed by the idle-task hooks (sdkconfig).
-    }
+    // No busy loop: app_main returns and the idle tasks feed the watchdog.
+}
 }

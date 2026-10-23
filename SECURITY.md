@@ -18,6 +18,8 @@ on them.
 ## What the production profile promises
 
 Secure Boot v2, release-mode flash encryption, secure ROM download mode,
-JTAG and USB-Serial-JTAG disabled, HMAC-based NVS encryption. The terminal
+JTAG revoked via Secure Boot (USB-Serial-JTAG burned off before first boot),
+HMAC-based NVS encryption. Signing keys and the eFuse plan are offline-only
+(docs/PROVISIONING.md). The terminal
 token is stored so that reading it requires a flash read-out through those
 mitigations. None of this applies to `dev`-profile builds.

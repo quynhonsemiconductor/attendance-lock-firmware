@@ -1,2 +1,1 @@
-idf_component_register(SRCS "provision.c" \
-                       INCLUDES "include")
+idf_component_register(SRCS "provision.c" INCLUDE_DIRS "include")
