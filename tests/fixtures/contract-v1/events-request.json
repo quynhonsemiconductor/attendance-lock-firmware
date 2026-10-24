@@ -1,0 +1,14 @@
+{
+  "stream": "6f1a2b3c-0000-4000-8000-000000000001",
+  "dropped": 0,
+  "events": [
+    {
+      "seq": 1234,
+      "reader": "in",
+      "uid": "04A1B2C3",
+      "result": "allow",
+      "device_ts": "2026-10-23T08:01:02Z",
+      "time_synced": true
+    }
+  ]
+}
