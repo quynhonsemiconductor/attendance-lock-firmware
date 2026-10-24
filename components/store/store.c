@@ -28,6 +28,11 @@
 // resend server-side). The door task's push may still erase when it wraps
 // before the sync task acked — bounded by one sector erase (~100 ms worst
 // case on ESP32-S3 at 40 MHz flash); the common path erases nothing.
+//
+// Boot scan cost: one 32-byte header read per sector plus a full pass over
+// every dirty sector's records — ≤ 4 MiB of flash reads, well under a
+// second at ESP32-S3 flash read speeds, once per boot, before the door
+// task starts (store_init runs from app_main).
 
 #define SEC_HDR_SIZE 32u
 #define REC_SIZE 64u
@@ -367,6 +372,9 @@ static size_t al_encode(uint8_t *blob, const store_card_t *cards, size_t n, cons
 
 bool store_init(void)
 {
+    if (!store_port_lock_init()) {
+        return false;
+    }
     store_port_lock();
     bool ok = false;
     do {
@@ -378,6 +386,7 @@ bool store_init(void)
         if (!scan_ring()) {
             break;
         }
+        v = 0; // ABSENT leaves v untouched — must not inherit the dropped value
         if (store_port_nvs_get_u32(NVS_KEY_SEQ_END, &v) == STORE_PORT_ERROR) {
             break;
         }
@@ -436,8 +445,9 @@ store_status_t store_allow_list_replace(const store_card_t *cards, size_t n, con
     if (n > STORE_CARDS_MAX) {
         return STORE_ERR_TOO_MANY; // LOUD: a stale list must be flagged, not silent
     }
-    size_t len = al_encode(al_blob, cards, n, etag, etag_len);
     store_port_lock();
+    // al_blob is shared: encode, write and decode all happen under the lock.
+    size_t len = al_encode(al_blob, cards, n, etag, etag_len);
     // NVS blob replace is atomic on commit (the port appends the new entry
     // before freeing the old), so a power cut leaves the old list active —
     // and every failure path here returns an error the caller surfaces.
@@ -452,20 +462,26 @@ store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t
     size_t len = sizeof(al_blob);
     store_port_lock();
     store_port_nvs_res_t r = store_port_nvs_get_blob(NVS_KEY_ALIST, al_blob, &len);
-    store_port_unlock();
+    // al_blob is shared: the whole decode stays under the lock.
+    store_status_t st = STORE_OK;
     if (r == STORE_PORT_ABSENT) {
-        return STORE_ABSENT;
+        st = STORE_ABSENT;
+    } else if (r == STORE_PORT_ERROR) {
+        st = STORE_ERR_NVS;
+    } else if (len < 9 || memcmp(al_blob, AL_MAGIC, 4) != 0) {
+        st = STORE_ERR_NVS; // unknown format: treated as no valid cache
     }
-    if (r == STORE_PORT_ERROR) {
-        return STORE_ERR_NVS;
+    size_t count = 0, etag_len = 0;
+    if (st == STORE_OK) {
+        count = get_u32le(&al_blob[4]);
+        etag_len = al_blob[8];
+        if (count > STORE_CARDS_MAX || 9 + etag_len + count * 20 > len) {
+            st = STORE_ERR_NVS; // corrupt/truncated: caller re-syncs
+        }
     }
-    if (len < 9 || memcmp(al_blob, AL_MAGIC, 4) != 0) {
-        return STORE_ERR_NVS; // unknown format: treated as no valid cache
-    }
-    size_t count = get_u32le(&al_blob[4]);
-    size_t etag_len = al_blob[8];
-    if (count > STORE_CARDS_MAX || 9 + etag_len + count * 20 > len) {
-        return STORE_ERR_NVS; // corrupt/truncated: caller re-syncs
+    store_status_t too_small = STORE_OK;
+    if (count > max_cards || etag_len > etag_cap) {
+        too_small = STORE_ERR_TOO_SMALL; // retryable with the sizes above
     }
     if (n_out != NULL) {
         *n_out = count;
@@ -473,8 +489,9 @@ store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t
     if (etag_len_out != NULL) {
         *etag_len_out = etag_len;
     }
-    if (count > max_cards || etag_len > etag_cap) {
-        return STORE_ERR_TOO_SMALL; // retryable with the sizes above
+    if (too_small != STORE_OK || st != STORE_OK) {
+        store_port_unlock();
+        return too_small != STORE_OK ? too_small : st;
     }
     if (out != NULL) {
         const uint8_t *e = &al_blob[9 + etag_len];
@@ -489,6 +506,7 @@ store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t
     if (etag != NULL) {
         memcpy(etag, &al_blob[9], etag_len);
     }
+    store_port_unlock();
     return STORE_OK;
 }
 
@@ -497,7 +515,17 @@ void store_stream_uuid(uint8_t out[16])
     memcpy(out, stream_uuid, 16);
 }
 
+static uint32_t seq_alloc_locked(void);
+
 uint32_t store_seq_next(void)
+{
+    store_port_lock();
+    uint32_t out = seq_alloc_locked();
+    store_port_unlock();
+    return out;
+}
+
+static uint32_t seq_alloc_locked(void)
 {
     if (seq_next > seq_end) {
         // Persist the new block end BEFORE handing out its first seq: a crash
@@ -569,8 +597,14 @@ bool store_event_push(const uint8_t *event, size_t len, uint32_t *seq_out)
 // same total wear, done on the sync task).
 static void erase_passed_sectors(uint64_t from, uint64_t to)
 {
+    // First boundary strictly after `from`, clamped to ≥ RECS_PER_SECTOR:
+    // boundary b erases the sector holding records [b-63, b), so b starts at
+    // one full sector even when from == 0 (first lap, sector 0).
     uint64_t b = (from + RECS_PER_SECTOR - 1) / RECS_PER_SECTOR * RECS_PER_SECTOR;
-    for (; b <= to && b > 0; b += RECS_PER_SECTOR) {
+    if (b < RECS_PER_SECTOR) {
+        b = RECS_PER_SECTOR;
+    }
+    for (; b <= to; b += RECS_PER_SECTOR) {
         uint32_t p = (uint32_t)((b / RECS_PER_SECTOR - 1) % n_sectors);
         if (S[p].state == SECT_DIRTY) {
             if (store_port_flash_erase(p * STORE_PORT_SECTOR_SIZE)) {

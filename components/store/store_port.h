@@ -29,7 +29,10 @@ bool store_port_flash_write(uint32_t offset, const void *in, size_t len);
 bool store_port_flash_erase(uint32_t offset);
 
 // Recursive lock around the whole component (door task push vs sync task
-// batch/ack/dropped). Each public store_* call takes it once.
+// batch/ack/dropped). Each public store_* call takes it once. The mutex is
+// created by store_port_lock_init() in store_init — store_init fails when
+// that returns false; the lock/unlock calls then never see NULL.
+bool store_port_lock_init(void);
 void store_port_lock(void);
 void store_port_unlock(void);
 

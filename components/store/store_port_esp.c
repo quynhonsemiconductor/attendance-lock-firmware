@@ -29,11 +29,19 @@ static const esp_partition_t *ring_part(void)
 
 static SemaphoreHandle_t store_mtx;
 
-void store_port_lock(void)
+bool store_port_lock_init(void)
 {
     if (store_mtx == NULL) {
         store_mtx = xSemaphoreCreateRecursiveMutex();
+        if (store_mtx == NULL) {
+            return false;
+        }
     }
+    return true;
+}
+
+void store_port_lock(void)
+{
     xSemaphoreTakeRecursive(store_mtx, portMAX_DELAY);
 }
 

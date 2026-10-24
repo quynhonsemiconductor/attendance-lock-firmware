@@ -37,6 +37,8 @@ size_t store_port_flash_size(void)
     return HOST_FLASH_SIZE;
 }
 
+bool store_port_lock_init(void) { return true; }
+
 void store_port_lock(void) {}
 void store_port_unlock(void) {}
 
@@ -72,9 +74,10 @@ bool store_port_flash_write(uint32_t offset, const void *in, size_t len)
     }
     const uint8_t *src = in;
     size_t n = len;
-    if (write_budget > 0 && write_budget < len) {
-        // Power cut: program the prefix, then die.
-        n = write_budget;
+    if (write_budget > 0 && len >= write_budget) {
+        // Power cut: program the prefix (budget-1 bytes — even a cut at the
+        // very last byte is a cut), then die.
+        n = write_budget - 1;
         write_budget = 0;
         for (size_t i = 0; i < n; i++) {
             uint8_t b = src[i];

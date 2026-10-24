@@ -98,6 +98,62 @@ void test_ack_is_durable_across_reboot(void)
     TEST_ASSERT_EQUAL_UINT32(((CAPACITY + 999) / 1000) * 1000 + 1, seq); // block reservation
 }
 
+void test_ack_erases_sector_zero_on_first_lap(void)
+{
+    // N1: boundary b erases the sector [b-63, b); with from == 0 the loop
+    // used to start at 0 and `b > 0` killed it, so sector 0 survived its
+    // own ack and a reboot replayed it.
+    uint8_t in[4];
+    for (uint32_t i = 0; i < 150; i++) {
+        fill(in, sizeof(in), (uint8_t)i);
+        TEST_ASSERT_TRUE(store_event_push(in, sizeof(in), NULL));
+    }
+    store_ack(100); // cursor passes sector 0's end (63)
+    TEST_ASSERT_TRUE(store_init()); // reboot
+    store_event_t out[STORE_BATCH_MAX];
+    size_t n = store_event_batch(out, STORE_BATCH_MAX);
+    // Sector 0 (seqs 1..63) was erased — its ack state went with it, so
+    // seqs 64..100 replay too (free resend); seqs 101..150 were never sent.
+    TEST_ASSERT_EQUAL_size_t(87, n);
+    TEST_ASSERT_EQUAL_UINT32(64, out[0].seq);
+    TEST_ASSERT_EQUAL_UINT32(150, out[86].seq);
+}
+
+void test_generation_check_rejects_mismatched_sector(void)
+{
+    // Defense-in-depth: a record whose sector generation does not match the
+    // absolute index must never be served (a mutant removing the check
+    // survives the rest of the suite). Forge a valid header bumping sector
+    // 1 from gen 2 (abs 63..125) to gen 5 (abs 252..314): its old records
+    // must not be served as events 64..126.
+    uint8_t in[4];
+    for (uint32_t i = 0; i < 126; i++) {
+        fill(in, sizeof(in), (uint8_t)i);
+        TEST_ASSERT_TRUE(store_event_push(in, sizeof(in), NULL));
+    }
+    uint8_t *fl = store_host_flash();
+    fl[4096 + 4] = 5; // sector 1 header: gen = 5 (bytes are CRC-covered)
+    // fix the header CRC (poly 0xEDB88320 over the first 28 bytes)
+    uint32_t crc = 0;
+    crc = ~crc;
+    for (uint32_t i = 0; i < 28; i++) {
+        crc ^= fl[4096 + i];
+        for (int b = 0; b < 8; b++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    crc = ~crc;
+    memcpy(fl + 4096 + 28, &crc, 4);
+    TEST_ASSERT_TRUE(store_init());
+    store_event_t out[STORE_BATCH_MAX];
+    size_t n = store_event_batch(out, STORE_BATCH_MAX);
+    // Only sector 0's records (seqs 1..63) are servable; sector 1's records
+    // belong to absolute indices 252..314 now, not 63..125.
+    TEST_ASSERT_EQUAL_size_t(63, n);
+    TEST_ASSERT_EQUAL_UINT32(1, out[0].seq);
+    TEST_ASSERT_EQUAL_UINT32(63, out[62].seq);
+}
+
 void test_reboot_recovers_ring_and_seq(void)
 {
     uint8_t in[6];
@@ -164,7 +220,9 @@ void test_torn_record_skipped_and_sector_sealed(void)
     TEST_ASSERT_EQUAL_size_t(1, n);
     TEST_ASSERT_EQUAL_UINT32(1001, out[0].seq);
     TEST_ASSERT_EQUAL_UINT8(0x77, out[0].bytes[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x00, fl[32 + 4 * 64 + 8]); // torn slot never resurrected
+    // Acking the four served events erases their whole sector (durable ack):
+    // the torn slot is gone entirely, so it can never be resurrected.
+    TEST_ASSERT_EQUAL_UINT8(0xFF, fl[32 + 4 * 64 + 8]);
 }
 
 void test_encrypted_blank_boots_like_real_flash(void)
@@ -378,6 +436,8 @@ int main(void)
     RUN_TEST(test_push_batch_roundtrip_and_peek);
     RUN_TEST(test_ack_deletes_through_acked);
     RUN_TEST(test_ack_is_durable_across_reboot);
+    RUN_TEST(test_ack_erases_sector_zero_on_first_lap);
+    RUN_TEST(test_generation_check_rejects_mismatched_sector);
     RUN_TEST(test_reboot_recovers_ring_and_seq);
     RUN_TEST(test_full_ring_survives_reboot_still_full);
     RUN_TEST(test_torn_record_skipped_and_sector_sealed);
@@ -386,6 +446,7 @@ int main(void)
     RUN_TEST(test_fault_erase_failure_not_counted);
     RUN_TEST(test_fault_record_write_cut_torn);
     RUN_TEST(test_fault_seq_persist_fails_push_fails_and_counts);
+    RUN_TEST(test_fault_nvs_blob_replace_interrupted_keeps_old);
     RUN_TEST(test_full_ring_drops_and_counts);
     RUN_TEST(test_dropped_survives_reboot_until_acked);
     RUN_TEST(test_seq_block_persisted_ahead_of_use);
