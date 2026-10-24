@@ -2,9 +2,7 @@
 secrets.h
 
 # Builds
-build/
-build-host/
-build-asan/
+build*/
 .build/
 .pio/
 sdkconfig

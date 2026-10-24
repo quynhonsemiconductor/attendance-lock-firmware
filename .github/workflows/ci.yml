@@ -31,8 +31,10 @@ jobs:
       matrix:
         profile: [dev, prod]
     container:
-      # espressif/idf:v6.0.3 pinned BY DIGEST (ESP-IDF v6.0.x; v6.1 is beta, ADR §2.8)
-      image: espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+      # espressif/idf pinned TAG + DIGEST (ESP-IDF v6.0.x; v6.1 is beta, ADR §2.8).
+      # The tag is what Renovate's allowedVersions rule matches (^v6\.0\.\d+$,
+      # org renovate-config); the digest is what actually runs.
+      image: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
     # The image's default shell is dash, which rejects `set -o pipefail`.
     defaults:
       run:
