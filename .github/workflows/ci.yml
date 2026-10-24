@@ -32,7 +32,7 @@ jobs:
         profile: [dev, prod]
     container:
       # espressif/idf:v6.0.3 pinned BY DIGEST (ESP-IDF v6.0.x; v6.1 is beta, ADR §2.8)
-      image: espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+      image: espressif/idf@sha256:6dcc7a9a743f24bf4769276551bdf11eb4c8c93ba604f31e5f3f505277c874a5
     # The image's default shell is dash, which rejects `set -o pipefail`.
     defaults:
       run:
