@@ -9,7 +9,10 @@
 # sdkconfig.defaults.
 #
 # Name,       Type, SubType, Offset, Size,     Flags
-nvs,          data, nvs,     ,       0x6000,
+# nvs is 64 KiB so the allow-list cache (≤ 16 KiB blob) can be replaced
+# atomically — NVS keeps the old entry readable until the new one commits,
+# which needs headroom for both.
+nvs,          data, nvs,     ,       0x10000,
 phy_init,     data, phy,     ,       0x1000,
 otadata,      data, ota,     ,       0x2000,
 ota_0,        app,  ota_0,   ,       0x320000,
