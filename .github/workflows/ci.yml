@@ -42,6 +42,13 @@ jobs:
         # Builds an image; never pushes a git ref.
         with: { persist-credentials: false }
 
+      # The event ring partition MUST stay encrypted (ADR §2.8): a plain
+      # `data/0x40` line without the flag would boot fine and leak events.
+      - name: Assert event_ring partition is encrypted
+        run: |
+          set -euo pipefail
+          grep -Eq '^event_ring,[[:space:]]*data,[[:space:]]*0x40,[^,]*,[^,]*,[[:space:]]*encrypted[[:space:]]*$' partitions.csv
+
       - name: Build (${{ matrix.profile }} profile)
         env:
           PROFILE: ${{ matrix.profile }}

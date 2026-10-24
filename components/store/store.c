@@ -14,10 +14,20 @@
 // records. Sectors are used strictly in the order they are (re)used; every
 // (re)use bumps the sector's generation by one, so generation - 1 IS the
 // sector's ordinal in the append history and a boot reconstructs the whole
-// layout from the headers alone — no per-event flash writes for metadata,
-// one sector erase per RECS_PER_SECTOR events (wear-aware, §2.8). A torn
-// record (power cut mid-write) fails its CRC and is skipped; the sector it
-// was in is sealed and the ring continues in the next one.
+// layout from the headers plus the records alone — no per-event metadata
+// writes, one sector erase per RECS_PER_SECTOR events (wear-aware, §2.8).
+//
+// A torn record (power cut mid-write) fails its CRC and is skipped; the
+// sector it was in is sealed and the ring continues in the next one. Note
+// that with flash encryption a BLANK sector also reads back as garbage, so
+// "blank" and "torn" are indistinguishable at boot — either way the sector
+// is unusable for appending and gets sealed (host tests reproduce this via
+// the keystream mode). store_ack erases each sector as soon as the read
+// cursor passes it, so the durable ack state is the set of erased sectors
+// and a reboot replays at most one partial sector (≤ 62 events, free to
+// resend server-side). The door task's push may still erase when it wraps
+// before the sync task acked — bounded by one sector erase (~100 ms worst
+// case on ESP32-S3 at 40 MHz flash); the common path erases nothing.
 
 #define SEC_HDR_SIZE 32u
 #define REC_SIZE 64u
@@ -38,8 +48,7 @@
 
 typedef struct {
     uint32_t gen;  // 0 = no valid header; else ordinal-of-use + 1
-    uint64_t abs;  // absolute record index of slot 0 (valid when gen != 0)
-    uint8_t valid; // consecutive valid records from slot 0 (write sector)
+    uint8_t valid; // consecutive valid records from slot 0 (0 when blank)
     uint8_t state; // SECT_*
 } sect_t;
 
@@ -53,11 +62,36 @@ static uint32_t max_gen;
 static bool ws_sealed; // write sector has a torn tail: cannot append in it
 static bool mounted;
 static size_t ring_capacity;
+static uint32_t max_ring_seq; // highest seq in the ring (stream/seq recovery)
 
 static uint32_t seq_end;  // persisted reserved-block end (seqs ≤ this are safe)
 static uint32_t seq_next; // next seq to hand out
 
-static uint32_t dropped; // full-ring drops not yet taken by the sync task
+static uint32_t dropped; // full-ring drops not yet acked by the sync task
+
+static uint8_t stream_uuid[16];
+static bool have_stream;
+
+// Explicit little-endian helpers (no host-endian memcpy of integers).
+static void put_u32le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t get_u32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// Absolute record index where a physical sector's slot 0 sits in the append
+// history (derived from the generation — no stored cursor).
+static uint64_t sector_abs(uint32_t p)
+{
+    return (uint64_t)(S[p].gen - 1) * RECS_PER_SECTOR;
+}
 
 // --- CRC32 (poly 0xEDB88320, no table: called only on push/batch/ack) ---
 
@@ -87,7 +121,7 @@ static void sec_encode(uint8_t *h, uint32_t gen)
     h[1] = (uint8_t)(SEC_MAGIC >> 8);
     h[2] = SEC_VER;
     h[3] = 0xFF;
-    memcpy(&h[4], &gen, 4);
+    put_u32le(&h[4], gen);
     uint32_t c = sec_crc(h);
     memcpy(&h[SEC_CRC_OFF], &c, 4);
 }
@@ -103,7 +137,7 @@ static bool sec_parse(const uint8_t *h, uint32_t *gen)
     if (stored != sec_crc(h)) {
         return false;
     }
-    memcpy(gen, &h[4], 4);
+    *gen = get_u32le(&h[4]);
     return *gen != 0;
 }
 
@@ -114,18 +148,23 @@ static void rec_encode(uint8_t *r, uint32_t seq, const uint8_t *payload, size_t 
     r[1] = (uint8_t)(REC_MAGIC >> 8);
     r[2] = (uint8_t)len;
     r[3] = 0xFF;
-    memcpy(&r[4], &seq, 4);
+    put_u32le(&r[4], seq);
     uint32_t c = crc32_upd(0, r, 8);
     c = crc32_upd(c, payload, len);
     memcpy(&r[8], &c, 4);
     memcpy(&r[REC_HDR_SIZE], payload, len);
 }
 
-// Decodes the record at the given absolute index; false when blank/torn.
+// Decodes the record at the given absolute index; false when blank/torn or
+// when the sector's generation does not match the index (a record left over
+// from an earlier era of the ring must never be served, §2.4).
 static bool rec_at(uint64_t abs_idx, uint32_t *seq, uint8_t *payload, size_t *len)
 {
     uint32_t p = (uint32_t)((abs_idx / RECS_PER_SECTOR) % n_sectors);
     uint32_t slot = (uint32_t)(abs_idx % RECS_PER_SECTOR);
+    if (S[p].gen == 0 || sector_abs(p) != abs_idx - slot) {
+        return false;
+    }
     uint32_t off = p * STORE_PORT_SECTOR_SIZE + SEC_HDR_SIZE + slot * REC_SIZE;
     uint8_t r[REC_SIZE];
     if (!store_port_flash_read(off, r, REC_SIZE)) {
@@ -142,7 +181,7 @@ static bool rec_at(uint64_t abs_idx, uint32_t *seq, uint8_t *payload, size_t *le
     if (stored != c) {
         return false; // torn write: skipped (§2.8)
     }
-    *seq = (uint32_t)r[4] | ((uint32_t)r[5] << 8) | ((uint32_t)r[6] << 16) | ((uint32_t)r[7] << 24);
+    *seq = get_u32le(&r[4]);
     memcpy(payload, &r[REC_HDR_SIZE], r[2]);
     *len = r[2];
     return true;
@@ -179,7 +218,6 @@ static bool scan_ring(void)
         uint32_t gen;
         if (sec_parse(h, &gen)) {
             S[p].gen = gen;
-            S[p].abs = (uint64_t)(gen - 1) * RECS_PER_SECTOR;
             S[p].state = SECT_DIRTY;
             if (gen > ws_gen) {
                 ws_gen = gen;
@@ -190,8 +228,9 @@ static bool scan_ring(void)
                 rs = p;
             }
         } else {
-            // Blank or garbage: blank stays until first use, garbage is
-            // erased before first use (factory-fresh partitions included).
+            // Blank or garbage: blank stays until first use, garbage (which
+            // includes an encrypted-blank sector and a torn header) is
+            // erased before first use.
             bool blank = true;
             for (uint32_t i = 0; i < SEC_HDR_SIZE; i++) {
                 if (h[i] != 0xFF) {
@@ -203,6 +242,7 @@ static bool scan_ring(void)
         }
     }
     max_gen = ws_gen;
+    max_ring_seq = 0;
     if (ws_gen == 0) {
         // Fresh ring.
         next_abs = 0;
@@ -210,19 +250,29 @@ static bool scan_ring(void)
         ws_sealed = false;
         return true;
     }
-    // Count consecutive valid records in the write sector; a torn tail
-    // (power cut mid-write) seals the sector.
+    // Scan every dirty sector's records from slot 0: consecutive-valid count
+    // (the full-ring check needs it for ALL sectors, not just the write
+    // sector) and the highest seq in the ring (stream/seq recovery).
     uint8_t payload[STORE_EVENT_MAX];
     size_t len;
     uint32_t seq;
-    uint32_t v = 0;
-    while (v < RECS_PER_SECTOR && rec_at(S[ws].abs + v, &seq, payload, &len)) {
-        v++;
+    for (uint32_t p = 0; p < n_sectors; p++) {
+        if (S[p].state != SECT_DIRTY) {
+            continue;
+        }
+        uint64_t base = sector_abs(p);
+        uint32_t v = 0;
+        while (v < RECS_PER_SECTOR && rec_at(base + v, &seq, payload, &len)) {
+            if (seq > max_ring_seq) {
+                max_ring_seq = seq;
+            }
+            v++;
+        }
+        S[p].valid = (uint8_t)v;
     }
-    S[ws].valid = (uint8_t)v;
-    next_abs = S[ws].abs + v;
-    ws_sealed = (v < RECS_PER_SECTOR);
-    read_abs = S[rs].abs; // nothing is acked across a boot
+    next_abs = sector_abs(ws) + S[ws].valid;
+    ws_sealed = (S[ws].valid < RECS_PER_SECTOR);
+    read_abs = sector_abs(rs); // durable ack state = erased sectors (§ack)
     normalize_head();
     return true;
 }
@@ -246,7 +296,7 @@ static bool ring_advance(bool *full)
     uint32_t p = (uint32_t)(logical % n_sectors);
     sect_t *s = &S[p];
     *full = false;
-    if (s->state == SECT_DIRTY && s->abs + s->valid > read_abs) {
+    if (s->state == SECT_DIRTY && sector_abs(p) + s->valid > read_abs) {
         *full = true;
         return false;
     }
@@ -260,10 +310,10 @@ static bool ring_advance(bool *full)
     uint32_t gen = max_gen + 1;
     sec_encode(h, gen);
     if (!store_port_flash_write(p * STORE_PORT_SECTOR_SIZE, h, SEC_HDR_SIZE)) {
+        s->state = SECT_UNKNOWN; // partial header: unusable until re-erased
         return false;
     }
     s->gen = gen;
-    s->abs = logical * RECS_PER_SECTOR;
     s->valid = 0;
     s->state = SECT_DIRTY;
     max_gen = gen;
@@ -279,32 +329,86 @@ static bool ring_advance(bool *full)
 #define NVS_KEY_SEQ_END "seqe"
 #define NVS_KEY_DROP "drop"
 
-static bool nvs_dropped_load(void)
+// Shared 16 KiB scratch for allow-list encode/decode — file-scope, never on
+// a task stack; every use is under the component lock.
+static uint8_t al_blob[9 + STORE_ETAG_MAX + STORE_CARDS_MAX * 20];
+
+// --- Allow-list blob ----------------------------------------------------
+//
+// [0..3]  magic 'A','L','1',0
+// [4..7]  count (u32 LE)
+// [8]     etag length (u8)
+// [9..]   etag bytes
+// [.]     entries, 20 bytes each: uid_len u8, uid[10], valid_from u32,
+//         valid_until u32 (LE), 1 pad byte.
+
+#define AL_MAGIC "AL1\x00"
+
+static size_t al_encode(uint8_t *blob, const store_card_t *cards, size_t n, const char *etag,
+                        size_t etag_len)
 {
-    // Missing key = fresh device = 0 (port contract).
-    dropped = 0;
-    return store_port_nvs_get_u32(NVS_KEY_DROP, &dropped);
+    memcpy(blob, AL_MAGIC, 4);
+    put_u32le(&blob[4], (uint32_t)n);
+    blob[8] = (uint8_t)etag_len;
+    memcpy(&blob[9], etag, etag_len);
+    uint8_t *e = &blob[9 + etag_len];
+    for (size_t i = 0; i < n; i++) {
+        e[0] = cards[i].uid_len;
+        memcpy(&e[1], cards[i].uid, STORE_UID_MAX);
+        put_u32le(&e[11], cards[i].valid_from);
+        put_u32le(&e[15], cards[i].valid_until);
+        e[19] = 0;
+        e += 20;
+    }
+    return (size_t)(9 + etag_len) + n * 20;
 }
 
 // --- Public API ---------------------------------------------------------
 
 bool store_init(void)
 {
-    if (!nvs_dropped_load()) {
-        return false;
-    }
-    if (!scan_ring()) {
-        return false;
-    }
-    uint32_t end = 0; // missing key = fresh device = 0 (port contract)
-    if (!store_port_nvs_get_u32(NVS_KEY_SEQ_END, &end)) {
-        return false;
-    }
-    seq_end = end;
-    seq_next = end + 1;
-    ring_capacity = (size_t)n_sectors * RECS_PER_SECTOR;
-    mounted = true;
-    return true;
+    store_port_lock();
+    bool ok = false;
+    do {
+        uint32_t v = 0;
+        if (store_port_nvs_get_u32(NVS_KEY_DROP, &v) == STORE_PORT_ERROR) {
+            break;
+        }
+        dropped = v;
+        if (!scan_ring()) {
+            break;
+        }
+        if (store_port_nvs_get_u32(NVS_KEY_SEQ_END, &v) == STORE_PORT_ERROR) {
+            break;
+        }
+        seq_end = v;
+        // The seq block continues past the persisted block end AND past
+        // everything still in the ring: after an NVS wipe the new stream's
+        // seqs can never collide with the old events still buffered (§2.4).
+        seq_next = seq_end > max_ring_seq ? seq_end + 1 : max_ring_seq + 1;
+        // Stream UUID: load once, cached in RAM.
+        size_t len = 16;
+        store_port_nvs_res_t r = store_port_nvs_get_blob(NVS_KEY_STREAM, stream_uuid, &len);
+        if (r == STORE_PORT_ERROR) {
+            break;
+        }
+        if (r == STORE_PORT_FOUND && len == 16) {
+            have_stream = true;
+        } else {
+            store_port_random_bytes(stream_uuid, 16);
+            stream_uuid[6] = (uint8_t)((stream_uuid[6] & 0x0F) | 0x40); // RFC 4122 v4
+            stream_uuid[8] = (uint8_t)((stream_uuid[8] & 0x3F) | 0x80);
+            if (!store_port_nvs_set_blob(NVS_KEY_STREAM, stream_uuid, 16)) {
+                break; // a stream we cannot persist would regenerate per boot
+            }
+            have_stream = true;
+        }
+        ring_capacity = (size_t)n_sectors * RECS_PER_SECTOR;
+        mounted = true;
+        ok = true;
+    } while (0);
+    store_port_unlock();
+    return ok;
 }
 
 size_t store_ring_capacity(void)
@@ -312,38 +416,85 @@ size_t store_ring_capacity(void)
     return ring_capacity;
 }
 
-bool store_allow_list_replace(const char *body, size_t len)
+store_status_t store_allow_list_replace(const store_card_t *cards, size_t n, const char *etag,
+                                        size_t etag_len)
 {
-    if (body == NULL || len == 0 || len > STORE_ALLOW_LIST_MAX) {
-        return false;
+    if (cards == NULL && n > 0) {
+        return STORE_ERR_ARG;
     }
+    if (etag == NULL && etag_len > 0) {
+        return STORE_ERR_ARG;
+    }
+    if (etag_len > STORE_ETAG_MAX) {
+        return STORE_ERR_ARG;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (cards[i].uid_len != 4 && cards[i].uid_len != 7 && cards[i].uid_len != 10) {
+            return STORE_ERR_ARG;
+        }
+    }
+    if (n > STORE_CARDS_MAX) {
+        return STORE_ERR_TOO_MANY; // LOUD: a stale list must be flagged, not silent
+    }
+    size_t len = al_encode(al_blob, cards, n, etag, etag_len);
+    store_port_lock();
     // NVS blob replace is atomic on commit (the port appends the new entry
-    // before freeing the old), so a power cut leaves the old list active.
-    return store_port_nvs_set_blob(NVS_KEY_ALIST, body, len);
+    // before freeing the old), so a power cut leaves the old list active —
+    // and every failure path here returns an error the caller surfaces.
+    bool ok = store_port_nvs_set_blob(NVS_KEY_ALIST, al_blob, len);
+    store_port_unlock();
+    return ok ? STORE_OK : STORE_ERR_NVS;
 }
 
-bool store_allow_list_read(char *out, size_t cap, size_t *len_out)
+store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t *n_out,
+                                     char *etag, size_t etag_cap, size_t *etag_len_out)
 {
-    size_t len = cap;
-    if (!store_port_nvs_get_blob(NVS_KEY_ALIST, out, &len)) {
-        return false;
+    size_t len = sizeof(al_blob);
+    store_port_lock();
+    store_port_nvs_res_t r = store_port_nvs_get_blob(NVS_KEY_ALIST, al_blob, &len);
+    store_port_unlock();
+    if (r == STORE_PORT_ABSENT) {
+        return STORE_ABSENT;
     }
-    if (len_out != NULL) {
-        *len_out = len;
+    if (r == STORE_PORT_ERROR) {
+        return STORE_ERR_NVS;
     }
-    return true;
+    if (len < 9 || memcmp(al_blob, AL_MAGIC, 4) != 0) {
+        return STORE_ERR_NVS; // unknown format: treated as no valid cache
+    }
+    size_t count = get_u32le(&al_blob[4]);
+    size_t etag_len = al_blob[8];
+    if (count > STORE_CARDS_MAX || 9 + etag_len + count * 20 > len) {
+        return STORE_ERR_NVS; // corrupt/truncated: caller re-syncs
+    }
+    if (n_out != NULL) {
+        *n_out = count;
+    }
+    if (etag_len_out != NULL) {
+        *etag_len_out = etag_len;
+    }
+    if (count > max_cards || etag_len > etag_cap) {
+        return STORE_ERR_TOO_SMALL; // retryable with the sizes above
+    }
+    if (out != NULL) {
+        const uint8_t *e = &al_blob[9 + etag_len];
+        for (size_t i = 0; i < count; i++) {
+            out[i].uid_len = e[0];
+            memcpy(out[i].uid, &e[1], STORE_UID_MAX);
+            out[i].valid_from = get_u32le(&e[11]);
+            out[i].valid_until = get_u32le(&e[15]);
+            e += 20;
+        }
+    }
+    if (etag != NULL) {
+        memcpy(etag, &al_blob[9], etag_len);
+    }
+    return STORE_OK;
 }
 
 void store_stream_uuid(uint8_t out[16])
 {
-    size_t len = 16;
-    if (store_port_nvs_get_blob(NVS_KEY_STREAM, out, &len) && len == 16) {
-        return;
-    }
-    store_port_random_bytes(out, 16);
-    out[6] = (uint8_t)((out[6] & 0x0F) | 0x40); // RFC 4122 v4 bits
-    out[8] = (uint8_t)((out[8] & 0x3F) | 0x80);
-    store_port_nvs_set_blob(NVS_KEY_STREAM, out, 16);
+    memcpy(out, stream_uuid, 16);
 }
 
 uint32_t store_seq_next(void)
@@ -352,8 +503,14 @@ uint32_t store_seq_next(void)
         // Persist the new block end BEFORE handing out its first seq: a crash
         // right after costs a gap, never a reuse (§2.4 — a reused seq would
         // be silently discarded server-side as a duplicate).
-        seq_end = ((seq_next + STORE_SEQ_BLOCK - 1) / STORE_SEQ_BLOCK) * STORE_SEQ_BLOCK;
-        store_port_nvs_set_u32(NVS_KEY_SEQ_END, seq_end);
+        uint32_t new_end = ((seq_next + STORE_SEQ_BLOCK - 1) / STORE_SEQ_BLOCK) * STORE_SEQ_BLOCK;
+        store_port_lock();
+        bool ok = store_port_nvs_set_u32(NVS_KEY_SEQ_END, new_end);
+        store_port_unlock();
+        if (!ok) {
+            return 0; // unreserved seq: caller must not store the event
+        }
+        seq_end = new_end;
     }
     return seq_next++;
 }
@@ -363,35 +520,67 @@ bool store_event_push(const uint8_t *event, size_t len, uint32_t *seq_out)
     if (!mounted || event == NULL || len == 0 || len > STORE_EVENT_MAX) {
         return false;
     }
-    uint32_t slot = (uint32_t)(next_abs % RECS_PER_SECTOR);
-    if (slot == 0 || ws_sealed) {
-        bool full = false;
-        if (!ring_advance(&full)) {
-            if (full) {
-                // Ring full: the door keeps working, the event is dropped and
-                // counted (§2.4). Persisted, so it survives until it is sent.
-                dropped++;
-                store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
+    store_port_lock();
+    bool ok = false;
+    do {
+        uint32_t slot = (uint32_t)(next_abs % RECS_PER_SECTOR);
+        if (slot == 0 || ws_sealed) {
+            bool full = false;
+            if (!ring_advance(&full)) {
+                if (full) {
+                    // Ring full: the door keeps working, the event is dropped
+                    // and counted (§2.4). Persisted until the count is sent.
+                    dropped++;
+                    store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
+                }
+                break;
             }
-            return false;
+            slot = (uint32_t)(next_abs % RECS_PER_SECTOR);
         }
-        slot = (uint32_t)(next_abs % RECS_PER_SECTOR);
+        uint32_t seq = store_seq_next();
+        if (seq == 0) {
+            // The seq reservation could not be persisted: without it a reboot
+            // might REUSE this seq (silently dropped server-side). Treat the
+            // push as failed and count it — staying silent is worse (§2.4).
+            dropped++;
+            store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
+            break;
+        }
+        uint8_t r[REC_SIZE];
+        rec_encode(r, seq, event, len);
+        uint32_t p = (uint32_t)((next_abs / RECS_PER_SECTOR) % n_sectors);
+        uint32_t off = p * STORE_PORT_SECTOR_SIZE + SEC_HDR_SIZE + slot * REC_SIZE;
+        if (!store_port_flash_write(off, r, REC_SIZE)) {
+            ws_sealed = true; // partial program: seal the sector, next push advances
+            break;
+        }
+        S[p].valid++;
+        next_abs++;
+        if (seq_out != NULL) {
+            *seq_out = seq;
+        }
+        ok = true;
+    } while (0);
+    store_port_unlock();
+    return ok;
+}
+
+// Erase every sector the ack cursor fully passed (durable ack state, §2.8:
+// same total wear, done on the sync task).
+static void erase_passed_sectors(uint64_t from, uint64_t to)
+{
+    uint64_t b = (from + RECS_PER_SECTOR - 1) / RECS_PER_SECTOR * RECS_PER_SECTOR;
+    for (; b <= to && b > 0; b += RECS_PER_SECTOR) {
+        uint32_t p = (uint32_t)((b / RECS_PER_SECTOR - 1) % n_sectors);
+        if (S[p].state == SECT_DIRTY) {
+            if (store_port_flash_erase(p * STORE_PORT_SECTOR_SIZE)) {
+                S[p].state = SECT_BLANK;
+                S[p].valid = 0;
+                // gen stays: the generation check in rec_at keeps any stale
+                // read from resurrecting it
+            }
+        }
     }
-    uint32_t seq = store_seq_next();
-    uint8_t r[REC_SIZE];
-    rec_encode(r, seq, event, len);
-    uint32_t p = (uint32_t)((next_abs / RECS_PER_SECTOR) % n_sectors);
-    uint32_t off = p * STORE_PORT_SECTOR_SIZE + SEC_HDR_SIZE + slot * REC_SIZE;
-    if (!store_port_flash_write(off, r, REC_SIZE)) {
-        ws_sealed = true; // partial program: seal the sector, next push advances
-        return false;
-    }
-    S[p].valid++;
-    next_abs++;
-    if (seq_out != NULL) {
-        *seq_out = seq;
-    }
-    return true;
 }
 
 size_t store_event_batch(store_event_t *out, size_t max_events)
@@ -399,26 +588,29 @@ size_t store_event_batch(store_event_t *out, size_t max_events)
     if (max_events > STORE_BATCH_MAX) {
         max_events = STORE_BATCH_MAX;
     }
+    store_port_lock();
     // Peek only: a batch that never got uploaded must be servable again, so
     // the cursor advances in store_ack(), not here.
     normalize_head();
     size_t n = 0;
     while (n < max_events && read_abs + n < next_abs) {
-        size_t len;
-        if (!rec_at(read_abs + n, &out[n].seq, out[n].bytes, &len)) {
+        if (!rec_at(read_abs + n, &out[n].seq, out[n].bytes, &out[n].len)) {
             break; // defensive: unreadable head — stop, never skip silently
         }
         n++;
     }
+    store_port_unlock();
     return n;
 }
 
 void store_ack(uint32_t acked_through)
 {
+    store_port_lock();
     // The batch is the oldest events in seq order, so one walk deletes
     // exactly the uploaded batch — accepted AND rejected seqs (§2.4: one bad
     // event never blocks the queue).
     normalize_head();
+    uint64_t from = read_abs;
     uint8_t payload[STORE_EVENT_MAX];
     size_t len;
     uint32_t seq;
@@ -429,14 +621,20 @@ void store_ack(uint32_t acked_through)
         read_abs++;
     }
     normalize_head();
+    erase_passed_sectors(from, read_abs);
+    store_port_unlock();
 }
 
-uint32_t store_dropped_take(void)
+uint32_t store_dropped_count(void)
 {
-    uint32_t v = dropped;
-    dropped = 0;
-    // Persisted per increment; the clear is best-effort — a lost clear only
-    // over-reports drops once after a reboot (server-side, additive).
-    store_port_nvs_set_u32(NVS_KEY_DROP, 0);
-    return v;
+    return dropped;
+}
+
+void store_dropped_ack(uint32_t n)
+{
+    store_port_lock();
+    dropped = (dropped > n) ? dropped - n : 0;
+    // Best-effort: a lost clear only over-reports drops once (additive).
+    store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
+    store_port_unlock();
 }

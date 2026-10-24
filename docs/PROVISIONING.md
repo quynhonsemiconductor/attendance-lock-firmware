@@ -68,13 +68,22 @@ asserted in CI).
        --output signed-bootloader.bin build-prod/bootloader/bootloader.bin
    espsecure sign-data --version 2 --keyfile secure_boot_key.pem \
        --output signed-attendance-lock.bin build-prod/attendance_lock.bin
-   # Addresses come from build-prod/flash_args; the bootloader and app are
-   # REPLACED with the signed files:
-   esptool --chip esp32s3 --port <UART0> write-flash \
-       0x0     signed-bootloader.bin \
-       0x10000 build-prod/partition_table/partition-table.bin \
-       0x18000 build-prod/ota_data_initial.bin \
-       0x20000 signed-attendance-lock.bin
+   # NEVER hard-code addresses — read them from build-prod/flash_args of the
+   # exact build being flashed (they move whenever the partition table
+   # moves). The bootloader and app entries are REPLACED with the signed
+   # files:
+   #
+   #   grep -E '^0x' build-prod/flash_args
+   #   # →  0x0       bootloader/bootloader.bin
+   #   #    0x<pt>      partition_table/partition-table.bin
+   #   #    0x<otadata> ota_data_initial.bin
+   #   #    0x<app>     attendance_lock.bin
+   #
+   #   esptool --chip esp32s3 --port <UART0> write-flash \
+   #       0x0         signed-bootloader.bin \
+   #       0x<pt>      build-prod/partition_table/partition-table.bin \
+   #       0x<otadata> build-prod/ota_data_initial.bin \
+   #       0x<app>     signed-attendance-lock.bin
    ```
 
    Flash the plaintext images while flash encryption is still OFF.

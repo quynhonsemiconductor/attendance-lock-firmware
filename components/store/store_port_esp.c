@@ -2,12 +2,17 @@
 // partition ("store" namespace). Flash encryption is transparent here —
 // esp_partition_* see plaintext (§2.8: NVS encryption uses the HMAC eFuse
 // scheme; the event_ring partition is marked `encrypted` in partitions.csv).
+// Note: with flash encryption a BLANK sector reads back as garbage — store.c
+// treats blank and torn identically (seal and move on).
 #include "store_port.h"
 
 #include <string.h>
 
+#include "bootloader_random.h"
 #include "esp_partition.h"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -20,6 +25,21 @@ static const esp_partition_t *ring_part(void)
         part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, "event_ring");
     }
     return part;
+}
+
+static SemaphoreHandle_t store_mtx;
+
+void store_port_lock(void)
+{
+    if (store_mtx == NULL) {
+        store_mtx = xSemaphoreCreateRecursiveMutex();
+    }
+    xSemaphoreTakeRecursive(store_mtx, portMAX_DELAY);
+}
+
+void store_port_unlock(void)
+{
+    xSemaphoreGiveRecursive(store_mtx);
 }
 
 static bool nvs_ready(void)
@@ -87,23 +107,21 @@ bool store_port_nvs_set_u32(const char *key, uint32_t v)
     return ok;
 }
 
-bool store_port_nvs_get_u32(const char *key, uint32_t *v)
+store_port_nvs_res_t store_port_nvs_get_u32(const char *key, uint32_t *v)
 {
     if (!nvs_ready()) {
-        return false;
+        return STORE_PORT_ERROR;
     }
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
-        return false;
+        return STORE_PORT_ERROR;
     }
     esp_err_t e = nvs_get_u32(h, key, v);
     nvs_close(h);
-    // Missing key = fresh device = 0 (port contract in store_port.h).
     if (e == ESP_ERR_NVS_NOT_FOUND) {
-        *v = 0;
-        return true;
+        return STORE_PORT_ABSENT;
     }
-    return e == ESP_OK;
+    return e == ESP_OK ? STORE_PORT_FOUND : STORE_PORT_ERROR;
 }
 
 bool store_port_nvs_set_blob(const char *key, const void *v, size_t len)
@@ -123,35 +141,31 @@ bool store_port_nvs_set_blob(const char *key, const void *v, size_t len)
     return ok;
 }
 
-bool store_port_nvs_get_blob(const char *key, void *out, size_t *len)
+store_port_nvs_res_t store_port_nvs_get_blob(const char *key, void *out, size_t *len)
 {
     if (!nvs_ready()) {
-        return false;
+        return STORE_PORT_ERROR;
     }
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
-        return false;
+        return STORE_PORT_ERROR;
     }
     esp_err_t e = nvs_get_blob(h, key, out, len);
     nvs_close(h);
-    return e == ESP_OK;
-}
-
-bool store_port_nvs_erase_key(const char *key)
-{
-    if (!nvs_ready()) {
-        return false;
+    if (e == ESP_ERR_NVS_NOT_FOUND) {
+        return STORE_PORT_ABSENT;
     }
-    nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
-        return false;
+    if (e == ESP_ERR_NVS_INVALID_LENGTH) {
+        return STORE_PORT_ERROR; // caller buffer too small
     }
-    bool ok = nvs_erase_key(h, key) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
-    return ok;
+    return e == ESP_OK ? STORE_PORT_FOUND : STORE_PORT_ERROR;
 }
 
 void store_port_random_bytes(void *out, size_t len)
 {
+    // Before Wi-Fi/BT is up the SAR ADC entropy source must be enabled
+    // explicitly (bootloader_random); the stream UUID must not repeat.
+    bootloader_random_enable();
     esp_fill_random(out, len);
+    bootloader_random_disable();
 }
