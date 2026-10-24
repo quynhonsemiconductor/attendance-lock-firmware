@@ -3,6 +3,7 @@ secrets.h
 
 # Builds
 build/
+build-host/
 .build/
 .pio/
 sdkconfig

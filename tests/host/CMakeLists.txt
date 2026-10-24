@@ -11,12 +11,25 @@ FetchContent_Declare(unity
   URL_HASH SHA256=aa4c9fb1ae5fc5242f914c65f3557e817e40cb37f04a31e5ff76d1ab89dbf674)
 FetchContent_MakeAvailable(unity)
 
-add_executable(host_tests
-  test_sample.c
-  # under test: component sources that are host-safe are added here directly
-  ../../components/store/store.c)
-target_include_directories(host_tests PRIVATE ../../components/store/include)
-target_link_libraries(host_tests PRIVATE unity)
+# store: the component is platform-free; the host port (RAM flash + NVS) is
+# linked in place of store_port_esp.c.
+set(STORE_SOURCES
+  ../../components/store/store.c
+  ../../components/store/store_port_host.c)
+include_directories(../../components/store) # store_port.h / store_port_host.h
+
+add_executable(host_tests_ring
+  test_store_ring.c
+  ${STORE_SOURCES})
+target_include_directories(host_tests_ring PRIVATE ../../components/store/include)
+target_link_libraries(host_tests_ring PRIVATE unity)
+
+add_executable(host_tests_alist
+  test_store_alist.c
+  ${STORE_SOURCES})
+target_include_directories(host_tests_alist PRIVATE ../../components/store/include)
+target_link_libraries(host_tests_alist PRIVATE unity)
 
 enable_testing()
-add_test(NAME sample COMMAND host_tests)
+add_test(NAME store_ring COMMAND host_tests_ring)
+add_test(NAME store_alist COMMAND host_tests_alist)

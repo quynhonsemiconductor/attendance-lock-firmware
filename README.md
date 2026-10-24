@@ -19,7 +19,7 @@ ESP-IDF v6.0.x rewrite, **not** a port of the Arduino prototype.
 | `components/sync` | allow-list poll + event batch upload (60 s poll) |
 | `components/clock` | NTP + server `Date` fallback |
 | `components/provision` | serial provisioning: base URL + token, write-only |
-| `tests/host/` | host unit tests (Unity, plain cmake) |
+| `tests/host/` | host unit tests (Unity, plain cmake): store ring + cache covered |
 | `partitions.csv` | two OTA app slots + encrypted event-ring partition |
 
 The base URL and the terminal token are **provisioned at runtime** over the

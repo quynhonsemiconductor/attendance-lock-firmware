@@ -5,6 +5,7 @@
 #include "lock/lock.h"
 #include "provision/provision.h"
 #include "reader/reader.h"
+#include "store/store.h"
 #include "sync/sync.h"
 
 void app_main(void)
@@ -16,6 +17,9 @@ void app_main(void)
     lock_engage();
 
     provision_init();
+    // Mount the event ring and the allow-list cache before anything reads
+    // them; on failure the door still works (locked) and sync re-syncs.
+    store_init();
     clock_init();
     reader_init();
     sync_init();
