@@ -29,7 +29,7 @@ are no hostnames, URLs or keys in this repository.
 ## Build
 
 Requires ESP-IDF **v6.0.x** (v6.1 is beta and unsupported). The same build runs
-in CI pinned to the `espressif/idf` container by digest.
+in CI pinned to the `espressif/idf` container by tag + digest (v6.0.x line).
 
 ```sh
 . $IDF_PATH/export.sh
