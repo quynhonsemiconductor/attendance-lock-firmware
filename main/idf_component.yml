@@ -1,0 +1,6 @@
+## version: 1
+# No managed components on purpose (ADR §2.8: IDF v6.0.x only). This manifest
+# exists so the component manager runs and writes dependencies.lock, pinning
+# "nothing managed" — an accidental `idf_component.yml` addition would then
+# show up as a reviewable diff in the lock.
+dependencies: {}

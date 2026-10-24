@@ -1,0 +1,17 @@
+# release-please — simple, one package (work item 6). Releases need the
+# owner's explicit "go release"; the release PR is never merged by CI.
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    uses: quynhonsemiconductor/ci/.github/workflows/release-please.yml@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
+    secrets:
+      QNSC_AUTOMATION_PRIVATE_KEY: ${{ secrets.QNSC_AUTOMATION_PRIVATE_KEY }}

@@ -1,0 +1,129 @@
+# =============================================================================
+# ci — build both firmware profiles in the pinned ESP-IDF container, run the
+# host unit tests, and report image size (ADR §2.8, work item 6).
+#
+# Shared gates from `ci` (gitleaks/Semgrep, PR title, workflow security) live
+# in security.yml / pr-title.yml — this file only carries what is
+# firmware-specific. The container is pinned BY DIGEST: a moving `:v6.0` tag
+# would let Espressif change the toolchain under a green build.
+# =============================================================================
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build-${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, prod]
+    container:
+      # espressif/idf:v6.0.3 pinned BY DIGEST (ESP-IDF v6.0.x; v6.1 is beta, ADR §2.8)
+      image: espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    # The image's default shell is dash, which rejects `set -o pipefail`.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        # Builds an image; never pushes a git ref.
+        with: { persist-credentials: false }
+
+      - name: Build (${{ matrix.profile }} profile)
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          # SEPARATE build dir + sdkconfig PER PROFILE: without the explicit
+          # SDKCONFIG the second profile built in a shared checkout would
+          # inherit values from the first one's sdkconfig (locally: a dev
+          # build would silently reuse prod values and vice versa).
+          idf.py -B "build-$PROFILE" \
+                 -DSDKCONFIG="build-$PROFILE/sdkconfig" \
+                 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.$PROFILE" \
+                 build
+
+      # The prod build must prove its hardening, not just compile (ADR §2.8).
+      # grep over the RESOLVED sdkconfig: catches a typo'd Kconfig symbol that
+      # would otherwise be silently dropped from sdkconfig.defaults.prod.
+      # JTAG is revoked by Secure Boot v2 as long as CONFIG_SECURE_BOOT_ALLOW_JTAG
+      # stays unset (there is no "disable JTAG" Kconfig), so we assert the
+      # absence; USB-Serial-JTAG is an eFuse burned before first prod boot
+      # (docs/PROVISIONING.md).
+      - name: Assert prod hardening landed
+        if: matrix.profile == 'prod'
+        run: |
+          set -euo pipefail
+          cfg="build-prod/sdkconfig"
+          missing=0
+          for opt in \
+              'CONFIG_SECURE_BOOT_V2_ENABLED=y' \
+              'CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y' \
+              'CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y' \
+              'CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=2' \
+              'CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y' \
+              'CONFIG_ESP_TASK_WDT_PANIC=y'; do
+            grep -qx "$opt" "$cfg" || { echo "::error::prod sdkconfig lost $opt"; missing=1; }
+          done
+          if grep -qx 'CONFIG_SECURE_BOOT_ALLOW_JTAG=y' "$cfg"; then
+            echo "::error::prod sdkconfig re-enables JTAG (CONFIG_SECURE_BOOT_ALLOW_JTAG)"; missing=1
+          fi
+          exit $missing
+
+      # Dev must stay soft: the profile diff against prod is the point.
+      - name: Assert dev profile has no hardening
+        if: matrix.profile == 'dev'
+        run: |
+          set -euo pipefail
+          cfg="build-dev/sdkconfig"
+          bad=0
+          for opt in 'CONFIG_SECURE_BOOT=y' 'CONFIG_SECURE_FLASH_ENC_ENABLED=y' \
+                     'CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y' 'CONFIG_NVS_ENCRYPTION=y'; do
+            if grep -qx "$opt" "$cfg"; then
+              echo "::error::dev sdkconfig gained $opt"; bad=1
+            fi
+          done
+          exit $bad
+
+      - name: Size report
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          idf.py -B "build-$PROFILE" size --format json2 --output-file "size-$PROFILE.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: size-${{ matrix.profile }}
+          path: size-*.json
+          retention-days: 30
+
+  host-tests:
+    name: host-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { persist-credentials: false }
+
+      - name: Configure, build, run
+        run: |
+          set -euo pipefail
+          cmake -S tests/host -B build-host
+          cmake --build build-host
+          ctest --test-dir build-host --output-on-failure

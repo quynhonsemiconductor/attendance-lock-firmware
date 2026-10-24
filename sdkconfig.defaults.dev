@@ -1,0 +1,7 @@
+# `dev` profile — NO hardening (ADR §2.8): plain flash, JTAG open, plain HTTP to
+# a laptop is allowed for phase 0. Never flashed onto a terminal that leaves the
+# bench. Every option below is the IDF default; stated explicitly so a profile
+# diff against prod is readable.
+CONFIG_SECURE_BOOT=n
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+CONFIG_NVS_ENCRYPTION=n

@@ -1,0 +1,32 @@
+# =============================================================================
+# PR title — Conventional Commits. The check is ci's composite action; a local
+# job keeps the required-check name stable (a reusable would rename it to
+# `<caller>/<called>` and the ruleset would require a check that never reports).
+# =============================================================================
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # the area/size labels; the title check itself only reads
+
+jobs:
+  pr-title:
+    # This name IS the required check. Do not rename it.
+    name: PR title (conventional commits)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout: the action reads the title from the event payload.
+      - uses: quynhonsemiconductor/ci/actions/pr-title-conventional-commits@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
+      - name: Area and size labels
+        if: ${{ github.event.action != 'edited' }}
+        continue-on-error: true
+        uses: quynhonsemiconductor/ci/actions/pr-labels@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
