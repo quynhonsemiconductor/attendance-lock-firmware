@@ -30,10 +30,12 @@ CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y
 # NVS encryption with the HMAC-based scheme — the key lives in an eFuse
 # (HMAC_KEY); there is deliberately NO nvs_keys partition (partitions.csv).
 # Key block plan (eFuses are irreversible — see docs/PROVISIONING.md):
-#   BLOCK_KEY0 = flash encryption key
-#   BLOCK_KEY1 = Secure Boot v2 signing-key digests
+#   BLOCK_KEY0 = flash encryption key (AES-128, generated on-chip)
+#   BLOCK_KEY1 = Secure Boot v2 primary signing-key digest
 #   BLOCK_KEY2 = NVS HMAC key  -> key_id 2
-# (blocks 3+ stay free; nothing else in this product burns keys)
+#   BLOCK_KEY3 = SB backup digest 1, BLOCK_KEY4 = SB backup digest 2
+#   (unused SB digest slots are revoked at first boot, so the backups are
+#   burned up front; KEY5 spare)
 CONFIG_NVS_ENCRYPTION=y
 CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y
 CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=2
