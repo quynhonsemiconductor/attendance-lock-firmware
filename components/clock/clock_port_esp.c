@@ -8,16 +8,24 @@
 #include "esp_attr.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "esp_sntp.h"
 
 #include "sdkconfig.h"
 
-// RTC slow memory: keeps its contents across deep sleep; a power-on reset
-// starts it as garbage/zero — the magic in the base detects that.
+// RTC slow memory: keeps its contents across deep sleep AND soft restarts;
+// a power-on reset starts it as garbage/zero — the magic detects that.
 static RTC_NOINIT_ATTR struct {
     uint32_t magic;
-    uint64_t epoch;
-    int64_t uptime_us;
+    uint32_t boot_magic;
+    uint32_t cur_boot_id;
+    uint8_t cur_valid;
+    uint8_t prev_valid;
+    uint32_t prev_boot_id;
+    uint64_t cur_epoch;
+    int64_t cur_uptime_us;
+    uint64_t prev_epoch;
+    int64_t prev_uptime_us;
 } s_rtc_base;
 
 #define BASE_MAGIC 0x434C4B31u // "CLK1" — must match clock.c
@@ -27,17 +35,15 @@ int64_t clock_port_uptime_us(void)
     return esp_timer_get_time();
 }
 
+bool clock_port_deep_sleep_wake(void)
+{
+    return esp_reset_reason() == ESP_RST_DEEPSLEEP;
+}
+
 clock_port_res_t clock_port_state_load(void *out, size_t cap, size_t *len)
 {
     if (cap < sizeof(s_rtc_base)) {
         return CLOCK_PORT_ERROR;
-    }
-    // RTC_NOINIT survives panic/watchdog/esp_restart too — but esp_timer
-    // restarts at 0 after any of those, so the stored uptime delta would be
-    // wrong and old ring events would be re-stamped as synced. The base is
-    // only usable straight out of deep sleep (RTC timer kept counting).
-    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
-        return CLOCK_PORT_ABSENT;
     }
     memcpy(out, &s_rtc_base, sizeof(s_rtc_base));
     *len = sizeof(s_rtc_base);
@@ -51,6 +57,13 @@ bool clock_port_state_store(const void *buf, size_t len)
     }
     memcpy(&s_rtc_base, buf, len);
     return true;
+}
+
+void clock_port_random_bytes(void *out, size_t len)
+{
+    bootloader_random_enable();
+    esp_fill_random(out, len);
+    bootloader_random_disable();
 }
 
 uint64_t clock_port_now_epoch(void)

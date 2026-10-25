@@ -19,6 +19,8 @@ void setUp(void)
     TEST_ASSERT_FALSE(clock_synced()); // fresh power-on: no clock
 }
 
+#define CUR clock_boot_id()
+
 void tearDown(void) {}
 
 void test_unsynced_stamp_is_uptime_and_flagged(void)
@@ -26,7 +28,7 @@ void test_unsynced_stamp_is_uptime_and_flagged(void)
     clock_host_set_uptime_us(3600ULL * 1000000); // 1 h after boot
     uint64_t epoch;
     bool synced;
-    clock_stamp(3600ULL * 1000000, &epoch, &synced);
+    clock_stamp(CUR, 3600ULL * 1000000, &epoch, &synced);
     TEST_ASSERT_FALSE(synced);
     TEST_ASSERT_EQUAL_UINT64(3600, epoch); // seconds-since-boot stand-in
 }
@@ -41,10 +43,10 @@ void test_time_source_sets_base_and_stamps_derive(void)
     // timestamp slightly before the base: 100 s of uptime ago.
     uint64_t epoch;
     bool synced;
-    clock_stamp(94000000, &epoch, &synced); // captured at uptime 94 s
+    clock_stamp(CUR, 94000000, &epoch, &synced); // captured at uptime 94 s
     TEST_ASSERT_TRUE(synced);
     TEST_ASSERT_EQUAL_UINT64(T_FIXTURE - 6, epoch);
-    clock_stamp(160000000, &epoch, &synced); // captured at uptime 160 s
+    clock_stamp(CUR, 160000000, &epoch, &synced); // captured at uptime 160 s
     TEST_ASSERT_EQUAL_UINT64(T_FIXTURE + 60, epoch);
     TEST_ASSERT_TRUE(synced);
 }
@@ -61,28 +63,35 @@ void test_base_survives_deep_sleep(void)
     TEST_ASSERT_TRUE(clock_synced());
     uint64_t epoch;
     bool synced;
-    clock_stamp(100000000ULL + 300 * 1000000, &epoch, &synced); // 5 min later
+    clock_stamp(CUR, 100000000ULL + 300 * 1000000, &epoch, &synced); // 5 min later
     TEST_ASSERT_TRUE(synced);
     TEST_ASSERT_EQUAL_UINT64(T_FIXTURE + 300, epoch);
 }
 
-void test_soft_restart_rejects_the_base(void)
+void test_soft_restart_keeps_prev_segment_base_and_boot_id(void)
 {
-    // BLOCKER: RTC_NOINIT survives panic/watchdog/esp_restart, but
-    // esp_timer restarts at 0 — keeping the base would re-stamp old ring
-    // events as synced with a wrong delta. Only a deep-sleep wake may keep
-    // it; a soft restart must come up unsynced and re-base.
+    // RTC_NOINIT survives panic/watchdog/esp_restart, but esp_timer
+    // restarts at 0 — the CURRENT base is stale and must not stamp new
+    // events; records from BEFORE the restart still derive from their own
+    // segment's kept base. The boot id is unchanged (same power-on).
     clock_host_set_uptime_us(100000000);
     clock_on_time_source(T_FIXTURE);
+    uint32_t old_boot = clock_boot_id();
     clock_host_set_uptime_us(500000); // uptime RESTARTED at ~0
     clock_host_soft_restart();
-    TEST_ASSERT_TRUE(clock_init()); // port readable
-    TEST_ASSERT_FALSE(clock_synced()); // but the stale base is rejected
+    TEST_ASSERT_TRUE(clock_init());
+    TEST_ASSERT_FALSE(clock_synced()); // the stale base is not current
+    TEST_ASSERT_NOT_EQUAL(old_boot, clock_boot_id()); // NEW segment id
     uint64_t epoch;
     bool synced;
-    clock_stamp(500000, &epoch, &synced);
+    // A NEW event (new segment) is unsynced; an OLD event (pre-restart
+    // uptime) still derives from the kept base.
+    clock_stamp(CUR, 500000, &epoch, &synced);
     TEST_ASSERT_FALSE(synced);
     TEST_ASSERT_EQUAL_UINT64(1, epoch); // uptime stand-in (0.5 s rounds to 1)
+    clock_stamp(old_boot, 94000000, &epoch, &synced); // captured at uptime 94 s
+    TEST_ASSERT_TRUE(synced);
+    TEST_ASSERT_EQUAL_UINT64(T_FIXTURE - 6, epoch);
 }
 
 void test_power_cut_clears_the_clock(void)
@@ -95,7 +104,7 @@ void test_power_cut_clears_the_clock(void)
     TEST_ASSERT_FALSE(clock_synced()); // but the base is gone: re-sync
     uint64_t epoch;
     bool synced;
-    clock_stamp(123456, &epoch, &synced);
+    clock_stamp(CUR, 123456, &epoch, &synced);
     TEST_ASSERT_FALSE(synced);
     TEST_ASSERT_EQUAL_UINT64(0, epoch); // uptime stand-in, not real time
 }
@@ -111,7 +120,7 @@ void test_resync_rebases_the_stamps(void)
     uint64_t epoch;
     bool synced;
     // Captured 5 s before the re-sync: derives from the NEW base backwards.
-    clock_stamp(100000000ULL + 1795 * 1000000, &epoch, &synced);
+    clock_stamp(CUR, 100000000ULL + 1795 * 1000000, &epoch, &synced);
     TEST_ASSERT_EQUAL_UINT64(T_FIXTURE + 1800, epoch);
 }
 
@@ -184,7 +193,7 @@ int main(void)
     RUN_TEST(test_unsynced_stamp_is_uptime_and_flagged);
     RUN_TEST(test_time_source_sets_base_and_stamps_derive);
     RUN_TEST(test_base_survives_deep_sleep);
-    RUN_TEST(test_soft_restart_rejects_the_base);
+    RUN_TEST(test_soft_restart_keeps_prev_segment_base_and_boot_id);
     RUN_TEST(test_power_cut_clears_the_clock);
     RUN_TEST(test_resync_rebases_the_stamps);
     RUN_TEST(test_http_date_fixture);

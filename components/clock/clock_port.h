@@ -11,21 +11,34 @@
 // uptime is continuous across a deep-sleep cycle.
 int64_t clock_port_uptime_us(void);
 
-// The persisted {epoch, uptime-at-set} base: RTC memory on the ESP32
-// (survives deep sleep, gone on power loss — exactly the wanted semantics).
+// Tri-state: a missing state is a normal state (power-on); a backend
+// failure is not.
 typedef enum {
     CLOCK_PORT_FOUND = 0,
-    CLOCK_PORT_ABSENT, // never written or power-lost: normal after a cut
-    CLOCK_PORT_ERROR   // backend failure
+    CLOCK_PORT_ABSENT,
+    CLOCK_PORT_ERROR
 } clock_port_res_t;
 
+// The persisted clock state in RTC memory: survives deep sleep AND soft
+// restarts (panic/watchdog/esp_restart), gone on power loss. Whether the
+// state is USABLE depends on the wake kind (see below) — the port hands out
+// the raw blob and the caller decides.
 clock_port_res_t clock_port_state_load(void *out, size_t cap, size_t *len);
 bool clock_port_state_store(const void *buf, size_t len);
+
+// True only when the device resumed from deep sleep (the RTC-backed
+// esp_timer kept counting, so stored uptime deltas stay valid). False after
+// power-on and after panic/watchdog/esp_restart — there esp_timer restarted
+// at 0 and every stored uptime delta is stale.
+bool clock_port_deep_sleep_wake(void);
 
 // Wall-clock epoch seconds from the system clock (set by SNTP behind the
 // scenes). Used to notice SNTP convergence inside the bounded sync session;
 // before any sync it returns something pre-2020 and the caller ignores it.
 uint64_t clock_port_now_epoch(void);
+
+// Random bytes (boot-id generation at power-on).
+void clock_port_random_bytes(void *out, size_t len);
 
 // Bounded SNTP session; the ESP port resolves the servers from Kconfig.
 void clock_port_sntp_start(void);

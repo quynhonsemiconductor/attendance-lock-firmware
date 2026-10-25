@@ -8,17 +8,26 @@
 
 #include "clock_port.h"
 
-// Persisted base. Magic guards against power-on garbage in RTC memory.
+// Persisted state. Magic guards against power-on garbage in RTC memory.
 #define BASE_MAGIC 0x434C4B31u // "CLK1"
+#define BOOT_MAGIC 0x424F4F54u // "BOOT"
 
 typedef struct {
     uint32_t magic;
-    uint64_t epoch;      // server time, seconds, at the moment of the set
-    int64_t uptime_us;   // clock_uptime_us() at the same moment
-} time_base_t;
+    uint32_t boot_magic;
+    uint32_t boot_id;
+    uint32_t cur_boot_id;  // this power segment's id
+    uint8_t cur_valid;     // current segment has a synced base
+    uint8_t prev_valid;    // previous segment's base kept across a soft restart
+    uint32_t prev_boot_id; // the segment that ran before the restart
+    uint64_t cur_epoch;
+    int64_t cur_uptime_us;
+    uint64_t prev_epoch;
+    int64_t prev_uptime_us;
+} time_state_t;
 
-static time_base_t base;
-static bool have_base;
+static time_state_t st;
+static uint32_t boot_id;
 static bool port_ok;
 
 int64_t clock_uptime_us(void)
@@ -29,47 +38,43 @@ int64_t clock_uptime_us(void)
 bool clock_init(void)
 {
     size_t len = 0;
-    have_base = false;
-    clock_port_res_t r = clock_port_state_load(&base, sizeof(base), &len);
+    clock_port_res_t r = clock_port_state_load(&st, sizeof(st), &len);
     port_ok = (r != CLOCK_PORT_ERROR);
-    if (port_ok && r == CLOCK_PORT_FOUND && len == sizeof(base) &&
-        base.magic == BASE_MAGIC) {
-        have_base = true;
+    bool have_state = port_ok && r == CLOCK_PORT_FOUND && len == sizeof(st) &&
+                      st.magic == BASE_MAGIC && st.boot_magic == BOOT_MAGIC;
+    if (!port_ok) {
+        return false;
     }
-    // ABSENT (or garbage after a power cut): normal "no clock yet".
-    return port_ok;
-}
-
-bool clock_synced(void)
-{
-    return have_base;
-}
-
-void clock_on_time_source(uint64_t epoch_now)
-{
-    base.magic = BASE_MAGIC;
-    base.epoch = epoch_now;
-    base.uptime_us = clock_port_uptime_us();
-    have_base = true;
-    clock_port_state_store(&base, sizeof(base));
-}
-
-void clock_stamp(int64_t uptime_us, uint64_t *epoch_out, bool *synced_out)
-{
-    if (have_base) {
-        int64_t delta_us = uptime_us - base.uptime_us;
-        // Floor division (an event captured BEFORE the sync — the usual
-        // same-boot case — lands slightly before base.epoch).
-        int64_t delta_s = delta_us >= 0 ? (delta_us + 500000) / 1000000
-                                        : -((-delta_us + 500000) / 1000000);
-        *epoch_out = (uint64_t)((int64_t)base.epoch + delta_s);
-        *synced_out = true;
+    if (have_state && clock_port_deep_sleep_wake()) {
+        // Deep sleep: the RTC timer kept counting — bases and boot id stand.
+        return true;
+    }
+    if (have_state) {
+        // Soft restart (panic/watchdog/esp_restart): esp_timer restarted at
+        // 0, so the current base is stale — keep it one slot back under the
+        // OLD segment id (records from before the restart still derive from
+        // it) and start a NEW segment, unsynced.
+        st.prev_valid = st.cur_valid;
+        st.prev_boot_id = st.cur_boot_id;
+        st.prev_epoch = st.cur_epoch;
+        st.prev_uptime_us = st.cur_uptime_us;
+        st.cur_valid = 0;
+        clock_port_random_bytes(&st.cur_boot_id, sizeof(st.cur_boot_id));
+        if (st.cur_boot_id == 0 || st.cur_boot_id == st.prev_boot_id) {
+            st.cur_boot_id = st.prev_boot_id + 1; // ids must differ
+        }
     } else {
-        // No clock: seconds-since-boot counted from the Unix epoch. Stable
-        // and monotonic; time_synced=false tells the server it is relative.
-        *epoch_out = (uint64_t)((uptime_us + 500000) / 1000000);
-        *synced_out = false;
+        // Power-on (or unreadable RTC): new boot id, no bases, no clock.
+        memset(&st, 0, sizeof(st));
+        st.magic = BASE_MAGIC;
+        st.boot_magic = BOOT_MAGIC;
+        clock_port_random_bytes(&st.cur_boot_id, sizeof(st.cur_boot_id));
+        if (st.cur_boot_id == 0) {
+            st.cur_boot_id = 1; // 0 stays "no segment"
+        }
     }
+    clock_port_state_store(&st, sizeof(st));
+    return true;
 }
 
 // --- HTTP Date (IMF-fixdate) parsing, libc-free -------------------------
@@ -119,6 +124,58 @@ static bool parse_uint(const char **s, int digits, uint64_t *out)
     }
     *out = v;
     return true;
+}
+
+bool clock_synced(void)
+{
+    return st.cur_valid != 0;
+}
+
+uint32_t clock_boot_id(void)
+{
+    return st.cur_boot_id;
+}
+
+void clock_on_time_source(uint64_t epoch_now)
+{
+    st.cur_valid = 1;
+    st.cur_epoch = epoch_now;
+    st.cur_uptime_us = clock_port_uptime_us();
+    clock_port_state_store(&st, sizeof(st));
+}
+
+void clock_stamp(uint32_t seg_boot_id, int64_t uptime_us, uint64_t *epoch_out, bool *synced_out)
+{
+    const uint64_t *epoch = NULL;
+    const int64_t *base_uptime = NULL;
+    if (seg_boot_id == st.cur_boot_id && st.cur_valid) {
+        epoch = &st.cur_epoch;
+        base_uptime = &st.cur_uptime_us;
+    } else if (seg_boot_id == st.prev_boot_id && st.prev_valid) {
+        // A record from BEFORE a soft restart derives from the kept base.
+        epoch = &st.prev_epoch;
+        base_uptime = &st.prev_uptime_us;
+    }
+    if (epoch != NULL) {
+        int64_t delta_us = uptime_us - *base_uptime;
+        // Round to nearest (an event captured BEFORE the sync — the usual
+        // same-segment case — lands slightly before base.epoch).
+        int64_t delta_s = delta_us >= 0 ? (delta_us + 500000) / 1000000
+                                        : -((-delta_us + 500000) / 1000000);
+        *epoch_out = (uint64_t)((int64_t)*epoch + delta_s);
+        *synced_out = true;
+    } else {
+        // No usable clock for this segment: seconds-since-boot counted from
+        // the Unix epoch. Stable and monotonic; time_synced=false tells the
+        // server the stamp is relative.
+        *epoch_out = (uint64_t)((uptime_us + 500000) / 1000000);
+        *synced_out = false;
+    }
+}
+
+uint64_t clock_system_epoch(void)
+{
+    return clock_port_now_epoch();
 }
 
 bool clock_parse_http_date(const char *s, uint64_t *epoch_out)
