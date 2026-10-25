@@ -1,8 +1,8 @@
 #pragma once
 // Battery monitor (battery decisions 2026-10-25): ADC behind a divider →
-// battery_mv; a low-battery flag ~1–2 weeks before cutoff (threshold in
-// Kconfig). It NEVER unlocks — the prototype's "low battery → stay open"
-// behaviour is dropped (ADR §2.8).
+// battery_mv; a low-battery flag at ~5.0 V (threshold in Kconfig) against
+// the ~4.8 V effective cutoff. It NEVER unlocks — the prototype's
+// "low battery → stay open" behaviour is dropped (ADR §2.8).
 #include <stdbool.h>
 #include <stdint.h>
 

@@ -17,7 +17,9 @@ config POWER_BATTERY_DIV_DIV
     default 1
 
 config POWER_BATTERY_LOW_MV
-    int "Low-battery threshold (pack mV, ~1–2 weeks before cutoff)"
-    default 11400
+    int "Low-battery threshold (pack mV)"
+    default 5000
+    help
+        Alert at ~5.0 V; the regulator's effective cutoff is ~4.8 V.
 
 endmenu
