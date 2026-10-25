@@ -7,7 +7,7 @@
 
 #include "esp_attr.h"
 #include "esp_timer.h"
-#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
 
 #include "sdkconfig.h"
 
@@ -53,20 +53,17 @@ uint64_t clock_port_now_epoch(void)
 
 void clock_port_sntp_start(void)
 {
-    const char *servers[] = {
-        CONFIG_CLOCK_SNTP_SERVER,
-        CONFIG_CLOCK_SNTP_SERVER_FALLBACK,
-    };
-    size_t n = servers[1][0] == '\0' ? 1 : 2;
-    esp_netif_sntp_config_t cfg =
-        ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(n, (const char **)servers);
-    cfg.start = false; // started explicitly below: a bounded session, not a daemon
-    if (esp_netif_sntp_init(&cfg) == ESP_OK) {
-        esp_netif_sntp_start();
+    // Plain lwip SNTP (the esp_netif_sntp wrapper was removed in IDF v6):
+    // poll mode, started explicitly — a bounded session, not a daemon.
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, CONFIG_CLOCK_SNTP_SERVER);
+    if (CONFIG_CLOCK_SNTP_SERVER_FALLBACK[0] != '\0') {
+        esp_sntp_setservername(1, CONFIG_CLOCK_SNTP_SERVER_FALLBACK);
     }
+    esp_sntp_init();
 }
 
 void clock_port_sntp_stop(void)
 {
-    esp_netif_sntp_deinit();
+    esp_sntp_stop();
 }
