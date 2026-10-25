@@ -489,9 +489,18 @@ store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t
     if (etag_len_out != NULL) {
         *etag_len_out = etag_len;
     }
-    if (too_small != STORE_OK || st != STORE_OK) {
+    if (st != STORE_OK) {
         store_port_unlock();
-        return too_small != STORE_OK ? too_small : st;
+        return st;
+    }
+    // Each out-buffer that fits is filled even on TOO_SMALL — callers that
+    // only want the ETag (If-None-Match) pass max_cards = 0.
+    if (etag != NULL && etag_len <= etag_cap) {
+        memcpy(etag, &al_blob[9], etag_len);
+    }
+    if (too_small != STORE_OK) {
+        store_port_unlock();
+        return too_small;
     }
     if (out != NULL) {
         const uint8_t *e = &al_blob[9 + etag_len];
@@ -502,9 +511,6 @@ store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t
             out[i].valid_until = get_u32le(&e[15]);
             e += 20;
         }
-    }
-    if (etag != NULL) {
-        memcpy(etag, &al_blob[9], etag_len);
     }
     store_port_unlock();
     return STORE_OK;
