@@ -111,7 +111,7 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     if (c == NULL) {
         return false;
     }
-    char ua[40];
+    char ua[64];
     snprintf(ua, sizeof(ua), UA_BASE "%s", esp_app_get_description()->version);
     esp_http_client_set_header(c, "User-Agent", ua);
     char auth[160];
