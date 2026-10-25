@@ -11,6 +11,8 @@
 #include "esp_random.h"
 #include "esp_sntp.h"
 
+#include "bootloader_random.h"
+
 #include "sdkconfig.h"
 
 // RTC slow memory: keeps its contents across deep sleep AND soft restarts;
