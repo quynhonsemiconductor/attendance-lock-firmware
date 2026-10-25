@@ -23,7 +23,7 @@ static const char *TAG = "sync";
 // Response buffers: 16 KiB covers STORE_CARDS_MAX cards' JSON with margin
 // (the card cap is shared between the decoder and the cache); post_resp is
 // sized per review for the ack/reject body. Static: sync-task-owned.
-#define RESP_CAP (16 * 1024)
+#define RESP_CAP (24 * 1024) // worst case: 256 cards of JSON ≈ 20.5 KiB
 #define POST_RESP_CAP 2048
 
 // Session buffers: file-scope, never on the sync task's stack; all uses are
@@ -66,18 +66,20 @@ bool sync_session_run(void)
                         sizeof(date))) {
         ok = false; // transport failure: keep everything, backoff
     } else if (status == 200) {
+        bool too_many = false;
         size_t n = sync_decode_allow_list(s_resp, resp_len, s_cards,
-                                          sizeof(s_cards) / sizeof(s_cards[0]));
+                                          sizeof(s_cards) / sizeof(s_cards[0]), &too_many);
         if (n == SIZE_MAX) {
             SYNC_LOGW("allow-list body malformed (len=%u)", (unsigned)resp_len);
-            ok = false;
-        } else if (n > STORE_CARDS_MAX) {
-            SYNC_LOGW("allow-list too large: count=%u", (unsigned)n);
-            ok = false;
+            ok = false; // the old cache stays: an empty-looking body must
+                        // never deny every card
+        } else if (too_many) {
+            SYNC_LOGW("allow-list too large: count>%u", (unsigned)STORE_CARDS_MAX);
+            ok = false; // loud: the old cache stays, sync flags it upstream
         } else if (store_allow_list_replace(s_cards, n, resp_etag, strlen(resp_etag)) !=
                    STORE_OK) {
             SYNC_LOGW("allow-list cache write failed");
-            ok = false; // loud: the old cache stays, sync flags it upstream
+            ok = false;
         }
     } else if (status == 304) {
         // unchanged — the cached list stays active (§2.4)
@@ -88,6 +90,12 @@ bool sync_session_run(void)
         ok = false; // 5xx / anything else: keep state
     }
 
+    // Bounded wait (≤ 5 s) for SNTP to actually converge before the re-base
+    // decision — starting it and reading immediately would almost always
+    // fall through to the Date header.
+    for (int i = 0; i < 50 && clock_system_epoch() < CLOCK_SNTP_EPOCH_FLOOR; i++) {
+        sync_port_delay_ms(100);
+    }
     // Re-base EVERY session (drift correction): SNTP time wins when the
     // system clock is past the floor, otherwise the Date header — before
     // the events are stamped.
@@ -113,12 +121,13 @@ bool sync_session_run(void)
         size_t n_good = 0;
         uint32_t bad_max_seq = 0;
         static char s_ev_probe[256];
+        const uint32_t dropped_from_store = dropped; // ack only what the store counted
         for (size_t i = 0; i < n; i++) {
             if (sync_encode_event((const sync_event_t *)s_batch[i].bytes, s_batch[i].seq,
                                   s_ev_probe, sizeof(s_ev_probe)) == 0) {
-                dropped++;
-                if (s_batch[i].seq > bad_max_seq) {
-                    bad_max_seq = s_batch[i].seq;
+                dropped++; // poison records are counted and REPORTED, but
+                if (s_batch[i].seq > bad_max_seq) { // never acked against the
+                    bad_max_seq = s_batch[i].seq;  // store's own counter
                 }
                 SYNC_LOGW("event encode failed: seq=%u", s_batch[i].seq);
                 continue;
@@ -152,7 +161,10 @@ bool sync_session_run(void)
                     acked = batch_max;
                 }
                 store_ack(acked); // accepted AND rejected seqs die together
-                store_dropped_ack(dropped); // only after the 200
+                store_dropped_ack(dropped_from_store); // only the store-read
+                // value: the poison additions above were already REPORTED in
+                // this envelope and must not be subtracted from a counter
+                // that never included them
                 if (rejected_len > 0) {
                     SYNC_LOGW("events rejected: count=%u", (unsigned)rejected_len);
                 }

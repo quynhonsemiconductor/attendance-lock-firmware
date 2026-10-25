@@ -72,13 +72,16 @@ static void emit_hex_lower(emit_t *e, const uint8_t *bytes, size_t n)
 
 size_t sync_encode_event(const sync_event_t *ev, uint32_t seq, char *out, size_t cap)
 {
-    if (ev == NULL || out == NULL || ev->uid_len < 4 || ev->uid_len > 10) {
+    // The server enforces {4,7,10}-byte UIDs — an odd-length UID would be
+    // rejected per-event and the record would stick in the queue forever.
+    if (ev == NULL || out == NULL ||
+        (ev->uid_len != 4 && ev->uid_len != 7 && ev->uid_len != 10)) {
         return 0;
     }
     emit_t e = { .buf = out, .cap = cap, .len = 0, .ok = true };
     uint64_t epoch;
     bool synced;
-    clock_stamp((int64_t)ev->uptime_us, &epoch, &synced);
+    clock_stamp(ev->boot_id, (int64_t)ev->uptime_us, &epoch, &synced);
     char ts[21];
     clock_iso8601(epoch, ts, sizeof(ts));
 
@@ -99,6 +102,33 @@ size_t sync_encode_event(const sync_event_t *ev, uint32_t seq, char *out, size_t
         e.buf[e.len] = '\0';
     }
     return e.ok ? e.len : 0;
+}
+
+bool sync_read_body(int (*read_fn)(char *buf, int len, void *ctx), void *ctx, char *resp,
+                    size_t cap, size_t *len_out)
+{
+    // cap-1: room for the NUL. More data after the buffer filled, or a read
+    // error, is a FAILURE — an oversized body must never arrive as a
+    // silently truncated 200 (a truncated allow-list would freeze
+    // revocations).
+    int total = 0;
+    int n;
+    while ((n = read_fn(resp + total, (int)(cap - 1 - total), ctx)) > 0) {
+        total += n;
+        if ((size_t)total >= cap - 1) {
+            char probe;
+            if (read_fn(&probe, 1, ctx) > 0) {
+                return false; // more data: truncated body
+            }
+            break;
+        }
+    }
+    if (n < 0) {
+        return false; // read error
+    }
+    resp[total] = '\0';
+    *len_out = (size_t)total;
+    return true;
 }
 
 size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
@@ -173,6 +203,8 @@ static bool scan_ch(scan_t *p, char c)
     return false;
 }
 
+static bool scan_skip_value_d(scan_t *p, int depth);
+
 // Skips one string literal of ANY length (ADR §2.4: unknown fields are
 // ignored — their size must not matter). Backslash escapes are stepped over.
 static bool scan_skip_string(scan_t *p)
@@ -233,6 +265,11 @@ static bool scan_string_relaxed(scan_t *p, char *out, size_t cap, bool *too_long
     return true;
 }
 
+static bool scan_skip_value(scan_t *p)
+{
+    return scan_skip_value_d(p, 0);
+}
+
 // Reads a string literal into out (NUL-terminated, truncation = failure).
 static bool scan_string(scan_t *p, char *out, size_t cap)
 {
@@ -279,10 +316,17 @@ static bool scan_uint(scan_t *p, uint64_t *out)
     return true;
 }
 
+#define SKIP_MAX_DEPTH 16
+
 // Skips one JSON value of any type (object, array, string, number,
-// true/false/null) — the unknown-field tolerance (§2.4).
-static bool scan_skip_value(scan_t *p)
+// true/false/null) — the unknown-field tolerance (§2.4). Depth-capped so
+// nested garbage cannot overflow the sync task's stack.
+static bool scan_skip_value_d(scan_t *p, int depth)
 {
+    if (depth > SKIP_MAX_DEPTH) {
+        p->ok = false;
+        return false;
+    }
     scan_ws(p);
     if (p->i >= p->len) {
         p->ok = false;
@@ -309,7 +353,7 @@ static bool scan_skip_value(scan_t *p)
                 }
                 (void)tl; // keys inside unknown objects are unknown too
             }
-            if (!scan_skip_value(p)) {
+            if (!scan_skip_value_d(p, depth + 1)) {
                 return false;
             }
             scan_ws(p);
@@ -363,11 +407,16 @@ static bool scan_uint_or_null(scan_t *p, uint64_t *out, bool *is_null)
     return scan_uint(p, out);
 }
 
-size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, size_t max_cards)
+size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out,
+                              size_t max_cards, bool *too_many)
 {
     scan_t p = { .s = body, .len = len, .i = 0, .ok = true };
     char key[24];
     size_t n = 0;
+    bool have_cards = false, too_many_local = false;
+    if (too_many != NULL) {
+        *too_many = false;
+    }
     if (!scan_ch(&p, '{')) {
         return SIZE_MAX;
     }
@@ -385,6 +434,7 @@ size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, s
                     return SIZE_MAX;
                 }
             } else if (strcmp(key, "cards") == 0) {
+                have_cards = true;
                 scan_ws(&p);
                 if (p.i >= p.len || p.s[p.i] != '[') {
                     return SIZE_MAX;
@@ -448,12 +498,14 @@ size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, s
                                         card.uid[b] = (uint8_t)(hv * 16 + lv);
                                     }
                                 } else if (strcmp(ck, "valid_from") == 0) {
-                                    if (!scan_uint_or_null(&p, &win, &is_null)) {
-                                        return SIZE_MAX;
+                                    if (!scan_uint_or_null(&p, &win, &is_null) ||
+                                        (!is_null && win > UINT32_MAX)) {
+                                        return SIZE_MAX; // reject, never truncate
                                     }
                                     card.valid_from = is_null ? 0 : (uint32_t)win;
                                 } else if (strcmp(ck, "valid_until") == 0) {
-                                    if (!scan_uint_or_null(&p, &win, &is_null)) {
+                                    if (!scan_uint_or_null(&p, &win, &is_null) ||
+                                        (!is_null && win > UINT32_MAX)) {
                                         return SIZE_MAX;
                                     }
                                     card.valid_until = is_null ? 0 : (uint32_t)win;
@@ -474,7 +526,7 @@ size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, s
                         if (n < max_cards) {
                             out[n++] = card; // uid validated above
                         } else {
-                            return SIZE_MAX; // more cards than the caller takes: loud
+                            too_many_local = true; // keep counting: loud, not silent
                         }
                         if (scan_ch(&p, ',')) {
                             continue;
@@ -500,8 +552,13 @@ size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, s
         }
     }
     scan_ws(&p);
-    if (p.i != p.len) {
-        return SIZE_MAX; // trailing garbage
+    if (p.i != p.len || !have_cards) {
+        // A missing "cards" key is MALFORMED, not an empty list — treating
+        // it as 0 cards would deny every card in the building.
+        return SIZE_MAX;
+    }
+    if (too_many != NULL) {
+        *too_many = too_many_local;
     }
     return n;
 }

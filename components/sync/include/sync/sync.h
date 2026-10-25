@@ -20,11 +20,12 @@ extern "C" {
 // Event payload the reader task pushes into the ring (≤ STORE_EVENT_MAX);
 // the sync component owns this wire-side layout.
 typedef struct __attribute__((packed)) {
-    uint8_t reader;     // 0 = in, 1 = out
-    uint8_t uid_len;    // 4, 7 or 10
+    uint8_t reader;       // 0 = in, 1 = out
+    uint8_t uid_len;      // 4, 7 or 10 (only these encode)
     uint8_t uid[10];
-    uint8_t result;     // 0 = allow, 1 = deny
-    uint64_t uptime_us; // capture time (LE) — device_ts derived at upload
+    uint8_t result;       // 0 = allow, 1 = deny
+    uint32_t boot_id;     // power segment the event belongs to (LE)
+    uint64_t uptime_us;   // capture time (LE) — device_ts derived at upload
 } sync_event_t;
 
 // Starts the sync task (device build): one bounded session per interval.
@@ -52,7 +53,15 @@ size_t sync_encode_event(const sync_event_t *ev, uint32_t seq, char *out, size_t
 // Parses the allow-list body (fixture: allow-list.json). Unknown fields are
 // skipped (§2.4: fields may be added). Returns the number of cards written
 // to out (≤ max_cards), or SIZE_MAX when the body is malformed.
-size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, size_t max_cards);
+size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out,
+                              size_t max_cards, bool *too_many);
+
+// Streams a response body to completion via read_fn (returns bytes read,
+// 0 = EOF, < 0 = error). Fills resp (NUL-terminated, ≤ cap-1 bytes).
+// Returns false when the body does not fit cap-1 (more data followed) or on
+// a read error — an oversized body must never arrive as a truncated 200.
+bool sync_read_body(int (*read_fn)(char *buf, int len, void *ctx), void *ctx, char *resp,
+                    size_t cap, size_t *len_out);
 
 // Parses the events response (fixture: events-response.json):
 // {"acked_through":N,"rejected":[seq,…]}. rejected seqs land in out_rejected

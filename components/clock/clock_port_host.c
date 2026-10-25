@@ -15,6 +15,7 @@ static struct {
 } s_state;
 
 static uint64_t injected_epoch = 0;    // "system clock" the tests control
+static uint64_t rng_state = 0xDEADBEEFu; // separate: random must not touch the clock
 int64_t clock_host_override_us = INT64_MIN; // "uptime" the tests control
 
 int64_t clock_port_uptime_us(void)
@@ -65,8 +66,10 @@ void clock_port_random_bytes(void *out, size_t len)
 {
     uint8_t *q = out;
     for (size_t i = 0; i < len; i++) {
-        injected_epoch = injected_epoch * 1103515245u + 12345u;
-        q[i] = (uint8_t)(injected_epoch >> 24);
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        q[i] = (uint8_t)(rng_state >> 24);
     }
 }
 

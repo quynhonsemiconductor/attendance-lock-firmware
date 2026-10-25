@@ -36,7 +36,7 @@ static bool nvs_ready(void)
         // NEVER wipe here: provisioning (base URL, token, Wi-Fi) lives in
         // this partition — an erase would silently de-provision the door.
         // Only the explicit factory-reset console command erases NVS.
-        ESP_LOGE(TAG, "nvs needs erase (err=%d) — run factory-reset", (int)e);
+        ESP_LOGE(TAG, "nvs unusable (err=%d) — refusing to wipe provisioning", (int)e);
         return false;
     }
     done = (e == ESP_OK);
@@ -98,12 +98,19 @@ bool sync_port_wifi_up(void)
         ESP_LOGW(TAG, "no wifi credentials provisioned");
         return false;
     }
-    if (esp_netif_init() != ESP_OK) {
-        return false;
+    static bool netif_inited, loop_inited, handler_registered;
+    if (!netif_inited) {
+        if (esp_netif_init() != ESP_OK) {
+            return false;
+        }
+        netif_inited = true;
     }
-    if (esp_event_loop_create_default() != ESP_OK &&
-        esp_event_loop_create_default() != ESP_ERR_INVALID_STATE) {
-        return false;
+    if (!loop_inited) {
+        esp_err_t e = esp_event_loop_create_default();
+        if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+            return false;
+        }
+        loop_inited = true;
     }
     if (!s_netif_up) { // created once; sessions reuse it
         esp_netif_create_default_wifi_sta();
@@ -113,6 +120,10 @@ bool sync_port_wifi_up(void)
         s_wifi_events = xEventGroupCreate();
     }
     xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
+    if (!handler_registered) { // exactly once across all sessions
+        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_ip_event, NULL);
+        handler_registered = true;
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     if (esp_wifi_init(&cfg) != ESP_OK) {
@@ -130,7 +141,6 @@ bool sync_port_wifi_up(void)
         esp_wifi_deinit();
         return false;
     }
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_ip_event, NULL);
     if (esp_wifi_start() != ESP_OK || esp_wifi_connect() != ESP_OK) {
         esp_wifi_stop();
         esp_wifi_deinit();
@@ -154,6 +164,11 @@ void sync_port_wifi_down(void)
     esp_wifi_deinit();
 }
 
+static int client_read_cb(char *buf, int len, void *ctx)
+{
+    return esp_http_client_read((esp_http_client_handle_t)ctx, buf, len);
+}
+
 bool sync_port_http(const char *method, const char *url, const char *path, const char *token,
                     const char *if_none_match, const char *body, size_t body_len,
                     long *status, char *resp, size_t cap, size_t *resp_len, char *etag,
@@ -169,6 +184,9 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
         .crt_bundle_attach = esp_crt_bundle_attach, // the CA set, not one pin
         .timeout_ms = 10000,
         .buffer_size = 2048,
+        // Never follow a redirect: the Authorization header would go to the
+        // redirect target. opshub never redirects the terminal API.
+        .disable_auto_redirect = true,
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (c == NULL) {

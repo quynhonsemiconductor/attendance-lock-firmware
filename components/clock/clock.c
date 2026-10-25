@@ -281,11 +281,6 @@ void clock_iso8601(uint64_t epoch, char *out, size_t cap)
     out[20] = '\0';
 }
 
-uint64_t clock_system_epoch(void)
-{
-    return clock_port_now_epoch();
-}
-
 // --- Bounded SNTP session (device-only mechanics behind the port) -------
 
 void clock_sntp_start(void)

@@ -1,5 +1,6 @@
 // Sync session + contract JSON codec, driven against the contract fixtures
-// (tests/fixtures/contract-v1, source opshub#480) and a scripted transport.
+// (tests/fixtures/contract-v1, door terminal contract v1) and a scripted
+// transport.
 #include "unity.h"
 
 #include <stdio.h>
@@ -62,6 +63,7 @@ static void minify(char *s)
 static sync_event_t fixture_event(void)
 {
     sync_event_t ev = { 0 };
+    ev.boot_id = clock_boot_id();
     ev.uptime_us = 1000000; // matches the pinned clock base in the tests
     ev.reader = 0; // "in"
     ev.uid_len = 4;
@@ -78,8 +80,10 @@ static sync_event_t fixture_event(void)
 void test_decode_allow_list_fixture(void)
 {
     store_card_t cards[8];
-    size_t n = sync_decode_allow_list(fixture("allow-list.json"), strlen(fixture("allow-list.json")),
-                                      cards, 8);
+    const char *fx = fixture("allow-list.json");
+    bool too_many = true;
+    size_t n = sync_decode_allow_list(fx, strlen(fx), cards, 8, &too_many);
+    TEST_ASSERT_FALSE(too_many);
     TEST_ASSERT_NOT_EQUAL(SIZE_MAX, n);
     TEST_ASSERT_EQUAL_size_t(1, n);
     TEST_ASSERT_EQUAL_UINT8(4, cards[0].uid_len);
@@ -97,8 +101,10 @@ void test_decode_allow_list_unknown_fields_tolerated(void)
         "{\"schema\":2,\"cards\":[{\"uid\":\"04A1B2C3\",\"label\":\"front\",\"valid_from\":null,"
         "\"meta\":{\"x\":1},\"valid_until\":1729000000}],\"gen\":\"z9\"}";
     store_card_t cards[8];
-    size_t n = sync_decode_allow_list(body, strlen(body), cards, 8);
+    bool too_many = false;
+    size_t n = sync_decode_allow_list(body, strlen(body), cards, 8, &too_many);
     TEST_ASSERT_NOT_EQUAL(SIZE_MAX, n);
+    TEST_ASSERT_FALSE(too_many);
     TEST_ASSERT_EQUAL_size_t(1, n);
     TEST_ASSERT_EQUAL_UINT32(1729000000, cards[0].valid_until);
 }
@@ -120,17 +126,31 @@ void test_decode_allow_list_rejects_malformed(void)
     store_card_t cards[8];
     // one intentional exception: lower-case MUST fold to the same card (§2.4
     // uppercase-hex rule is enforced server-side; the terminal is tolerant).
-    size_t n = sync_decode_allow_list(bad[1], strlen(bad[1]), cards, 8);
+    bool too_many = false;
+    size_t n = sync_decode_allow_list(bad[1], strlen(bad[1]), cards, 8, &too_many);
     TEST_ASSERT_NOT_EQUAL(SIZE_MAX, n);
     TEST_ASSERT_EQUAL_UINT8(0x04, cards[0].uid[0]);
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         if (i == 1) {
             continue;
         }
-        TEST_ASSERT_EQUAL_UINT32_MESSAGE(SIZE_MAX,
-                                         sync_decode_allow_list(bad[i], strlen(bad[i]), cards, 8),
-                                         bad[i]);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+            SIZE_MAX, sync_decode_allow_list(bad[i], strlen(bad[i]), cards, 8, &too_many),
+            bad[i]);
     }
+    // A body WITHOUT a "cards" key is malformed — decoding it to 0 cards
+    // would replace the cache and deny every card in the building.
+    TEST_ASSERT_EQUAL_UINT32(SIZE_MAX,
+                             sync_decode_allow_list("{}", 2, cards, 8, &too_many));
+    // An explicit empty list is legitimate (revoke everyone).
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX,
+                          sync_decode_allow_list("{\"cards\":[]}", 12, cards, 8, &too_many));
+    // Windows over UINT32_MAX: reject, never truncate.
+    TEST_ASSERT_EQUAL_UINT32(
+        SIZE_MAX,
+        sync_decode_allow_list(
+            "{\"cards\":[{\"uid\":\"04A1B2C3\",\"valid_until\":17290000000}]}", 60, cards,
+            8, &too_many));
 }
 
 void test_decode_events_response_fixture(void)
@@ -258,7 +278,7 @@ void test_session_no_events_skips_post(void)
 
 void test_session_uploads_batch_and_acks(void)
 {
-    uint8_t payload[21];
+    uint8_t payload[sizeof(sync_event_t)];
     sync_event_t ev = fixture_event();
     memcpy(payload, &ev, sizeof(ev));
     for (uint32_t i = 0; i < 3; i++) {
@@ -295,7 +315,7 @@ void test_session_uploads_batch_and_acks(void)
 
 void test_session_reports_dropped_and_acks_it(void)
 {
-    uint8_t payload[21];
+    uint8_t payload[sizeof(sync_event_t)];
     sync_event_t ev = fixture_event();
     memcpy(payload, &ev, sizeof(ev));
     for (size_t i = 0; i < 64512 + 2; i++) { // fill the ring: 2 drops
@@ -310,7 +330,7 @@ void test_session_reports_dropped_and_acks_it(void)
 
 void test_session_failed_post_keeps_batch_and_dropped(void)
 {
-    uint8_t payload[21];
+    uint8_t payload[sizeof(sync_event_t)];
     sync_event_t ev = fixture_event();
     memcpy(payload, &ev, sizeof(ev));
     TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL));
@@ -327,7 +347,7 @@ void test_session_failed_post_keeps_batch_and_dropped(void)
 
 void test_session_transport_failure_keeps_state(void)
 {
-    uint8_t payload[21];
+    uint8_t payload[sizeof(sync_event_t)];
     sync_event_t ev = fixture_event();
     memcpy(payload, &ev, sizeof(ev));
     TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL));
@@ -350,7 +370,7 @@ void test_session_oversized_body_is_transport_failure(void)
 
 void test_session_clamps_ack_to_the_batch(void)
 {
-    uint8_t payload[21];
+    uint8_t payload[sizeof(sync_event_t)];
     sync_event_t ev = fixture_event();
     memcpy(payload, &ev, sizeof(ev));
     for (uint32_t i = 0; i < 150; i++) { // two batches' worth
@@ -368,12 +388,12 @@ void test_session_clamps_ack_to_the_batch(void)
 
 void test_session_poison_record_dropped_not_blocking(void)
 {
-    uint8_t payload[21];
+    uint8_t payload[sizeof(sync_event_t)];
     sync_event_t ev = fixture_event();
     memcpy(payload, &ev, sizeof(ev));
     TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL)); // seq 1
     TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL)); // seq 2
-    uint8_t poison[21];
+    uint8_t poison[sizeof(sync_event_t)];
     sync_event_t bad = { 0 }; // uid_len 0: fails to encode
     memcpy(poison, &bad, sizeof(bad));
     TEST_ASSERT_TRUE(store_event_push(poison, sizeof(poison), NULL)); // seq 3
@@ -396,21 +416,19 @@ void test_session_rebases_every_session(void)
     // Drift correction: SNTP (system clock past the floor) re-bases EVERY
     // session, not just the first.
     clock_host_set_epoch(1792742462ULL);
-    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL,
-                      "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"cards\":[]}", NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
     TEST_ASSERT_TRUE(sync_session_run());
     uint64_t epoch;
     bool synced;
-    clock_stamp(clock_uptime_us(), &epoch, &synced);
+    clock_stamp(clock_boot_id(), clock_uptime_us(), &epoch, &synced);
     TEST_ASSERT_TRUE(synced);
     TEST_ASSERT_EQUAL_UINT64(1792742462ULL, epoch);
     // Next session: the system clock moved on (SNTP), the Date header is
     // stale — the SNTP time must win.
     clock_host_set_epoch(1792742462ULL + 600);
-    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL,
-                      "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"cards\":[]}", NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
     TEST_ASSERT_TRUE(sync_session_run());
-    clock_stamp(clock_uptime_us(), &epoch, &synced);
+    clock_stamp(clock_boot_id(), clock_uptime_us(), &epoch, &synced);
     TEST_ASSERT_EQUAL_UINT64(1792742462ULL + 600, epoch);
 }
 
@@ -423,8 +441,10 @@ void test_decode_allow_list_long_unknown_keys_and_strings(void)
              "\"%3000s\",\"note\":\"ok\"}],\"tail\":\"%5000s\"}",
              "K", "K", "V", "V");
     store_card_t cards[8];
-    size_t n = sync_decode_allow_list(body, strlen(body), cards, 8);
+    bool too_many = false;
+    size_t n = sync_decode_allow_list(body, strlen(body), cards, 8, &too_many);
     TEST_ASSERT_NOT_EQUAL(SIZE_MAX, n);
+    TEST_ASSERT_FALSE(too_many);
     TEST_ASSERT_EQUAL_size_t(1, n);
     TEST_ASSERT_EQUAL_UINT8(0x04, cards[0].uid[0]);
 }
@@ -438,7 +458,7 @@ void test_session_unprovisioned_skips_everything(void)
 
 void test_session_401_keeps_events_queued(void)
 {
-    uint8_t payload[21];
+    uint8_t payload[sizeof(sync_event_t)];
     sync_event_t ev = fixture_event();
     memcpy(payload, &ev, sizeof(ev));
     TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL));
@@ -453,13 +473,12 @@ void test_session_uses_date_header_when_unsynced(void)
 {
     // SNTP did not converge in this session; the response Date header is the
     // fallback (§2.4) — later events stamp synced from it.
-    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL,
-                      "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"cards\":[]}", NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
     TEST_ASSERT_TRUE(sync_session_run());
     TEST_ASSERT_TRUE(clock_synced());
     uint64_t epoch;
     bool synced;
-    clock_stamp(clock_uptime_us(), &epoch, &synced);
+    clock_stamp(clock_boot_id(), clock_uptime_us(), &epoch, &synced);
     TEST_ASSERT_TRUE(synced);
     TEST_ASSERT_EQUAL_UINT64(1792742462ULL, epoch);
 }
