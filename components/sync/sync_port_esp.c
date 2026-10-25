@@ -142,7 +142,7 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
             resp[read_total] = '\0';
             *resp_len = (size_t)read_total;
         }
-        const char *hdr = NULL;
+        char *hdr = NULL; // v6 signature: char **value_out
         if (etag != NULL && esp_http_client_get_header(c, "ETag", &hdr) == ESP_OK && hdr) {
             snprintf(etag, etag_cap, "%s", hdr);
         }
