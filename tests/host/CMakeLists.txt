@@ -62,8 +62,26 @@ target_compile_definitions(host_tests_sync PRIVATE
   SYNC_HOST_BUILD)
 target_link_libraries(host_tests_sync PRIVATE unity)
 
+set(DOOR_SOURCES
+  ../../components/door/door.c
+  ../../components/lock/lock_math.c
+  ../../components/reader/reader_logic.c
+  ../../components/power/power.c)
+
+add_executable(host_tests_door
+  test_door.c
+  ${DOOR_SOURCES})
+target_include_directories(host_tests_door PRIVATE
+  ../../components/door/include
+  ../../components/lock/include
+  ../../components/reader/include
+  ../../components/power/include
+  ../../components/store/include)
+target_link_libraries(host_tests_door PRIVATE unity)
+
 enable_testing()
 add_test(NAME store_ring COMMAND host_tests_ring)
 add_test(NAME store_alist COMMAND host_tests_alist)
 add_test(NAME clock COMMAND host_tests_clock)
 add_test(NAME sync COMMAND host_tests_sync)
+add_test(NAME door COMMAND host_tests_door)

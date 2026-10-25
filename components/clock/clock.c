@@ -8,26 +8,12 @@
 
 #include "clock_port.h"
 
-// Persisted state. Magic guards against power-on garbage in RTC memory.
+// Persisted state (clock_state_t lives in clock_port.h — one definition for
+// the logic and the RTC layout). Magics guard against power-on garbage.
 #define BASE_MAGIC 0x434C4B31u // "CLK1"
 #define BOOT_MAGIC 0x424F4F54u // "BOOT"
 
-typedef struct {
-    uint32_t magic;
-    uint32_t boot_magic;
-    uint32_t boot_id;
-    uint32_t cur_boot_id;  // this power segment's id
-    uint8_t cur_valid;     // current segment has a synced base
-    uint8_t prev_valid;    // previous segment's base kept across a soft restart
-    uint32_t prev_boot_id; // the segment that ran before the restart
-    uint64_t cur_epoch;
-    int64_t cur_uptime_us;
-    uint64_t prev_epoch;
-    int64_t prev_uptime_us;
-} time_state_t;
-
-static time_state_t st;
-static uint32_t boot_id;
+static clock_state_t st;
 static bool port_ok;
 
 int64_t clock_uptime_us(void)
@@ -73,7 +59,9 @@ bool clock_init(void)
             st.cur_boot_id = 1; // 0 stays "no segment"
         }
     }
-    clock_port_state_store(&st, sizeof(st));
+    if (!clock_port_state_store(&st, sizeof(st))) {
+        clock_port_log("clock state persist failed — stamps may reset on reboot");
+    }
     return true;
 }
 
@@ -141,7 +129,9 @@ void clock_on_time_source(uint64_t epoch_now)
     st.cur_valid = 1;
     st.cur_epoch = epoch_now;
     st.cur_uptime_us = clock_port_uptime_us();
-    clock_port_state_store(&st, sizeof(st));
+    if (!clock_port_state_store(&st, sizeof(st))) {
+        clock_port_log("clock state persist failed — stamps may reset on reboot");
+    }
 }
 
 void clock_stamp(uint32_t seg_boot_id, int64_t uptime_us, uint64_t *epoch_out, bool *synced_out)

@@ -1,0 +1,27 @@
+menu "Door"
+
+config DOOR_UNLOCK_HOLD_MS
+    int "Milliseconds the lock stays released after an allowed tap"
+    default 5000
+
+config DOOR_FEEDBACK_GPIO_GREEN
+    int "Feedback LED green GPIO"
+    default 16
+
+config DOOR_FEEDBACK_GPIO_RED
+    int "Feedback LED red GPIO"
+    default 47
+
+config DOOR_FEEDBACK_GPIO_BUZZER
+    int "Feedback buzzer GPIO"
+    default 5
+
+config DOOR_EXIT_BTN_GPIO
+    int "Exit button GPIO (convenience unlock, inside)"
+    default 6
+
+config DOOR_EXIT_DEBOUNCE_MS
+    int "Exit button debounce (ms)"
+    default 40
+
+endmenu

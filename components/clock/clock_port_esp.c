@@ -9,7 +9,10 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "esp_log.h"
 #include "esp_sntp.h"
+
+static const char *TAG = "clock";
 
 #include "bootloader_random.h"
 
@@ -17,24 +20,16 @@
 
 // RTC slow memory: keeps its contents across deep sleep AND soft restarts;
 // a power-on reset starts it as garbage/zero — the magic detects that.
-static RTC_NOINIT_ATTR struct {
-    uint32_t magic;
-    uint32_t boot_magic;
-    uint32_t cur_boot_id;
-    uint8_t cur_valid;
-    uint8_t prev_valid;
-    uint32_t prev_boot_id;
-    uint64_t cur_epoch;
-    int64_t cur_uptime_us;
-    uint64_t prev_epoch;
-    int64_t prev_uptime_us;
-} s_rtc_base;
-
-#define BASE_MAGIC 0x434C4B31u // "CLK1" — must match clock.c
+static RTC_NOINIT_ATTR clock_state_t s_rtc_state;
 
 int64_t clock_port_uptime_us(void)
 {
     return esp_timer_get_time();
+}
+
+void clock_port_log(const char *msg)
+{
+    ESP_LOGE(TAG, "%s", msg);
 }
 
 bool clock_port_deep_sleep_wake(void)
@@ -44,20 +39,20 @@ bool clock_port_deep_sleep_wake(void)
 
 clock_port_res_t clock_port_state_load(void *out, size_t cap, size_t *len)
 {
-    if (cap < sizeof(s_rtc_base)) {
+    if (cap < sizeof(s_rtc_state)) {
         return CLOCK_PORT_ERROR;
     }
-    memcpy(out, &s_rtc_base, sizeof(s_rtc_base));
-    *len = sizeof(s_rtc_base);
+    memcpy(out, &s_rtc_state, sizeof(s_rtc_state));
+    *len = sizeof(s_rtc_state);
     return CLOCK_PORT_FOUND;
 }
 
 bool clock_port_state_store(const void *buf, size_t len)
 {
-    if (len != sizeof(s_rtc_base)) {
+    if (len != sizeof(s_rtc_state)) {
         return false;
     }
-    memcpy(&s_rtc_base, buf, len);
+    memcpy(&s_rtc_state, buf, len);
     return true;
 }
 

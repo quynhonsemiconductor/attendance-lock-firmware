@@ -487,8 +487,8 @@ void test_session_uses_date_header_when_unsynced(void)
 
 void test_next_delay_interval_when_clean(void)
 {
-    TEST_ASSERT_EQUAL_UINT32(30u * 60 * 1000, sync_next_delay_ms(true, 0));
-    TEST_ASSERT_EQUAL_UINT32(30u * 60 * 1000, sync_next_delay_ms(true, 5));
+    TEST_ASSERT_EQUAL_UINT32(60u * 60 * 1000, sync_next_delay_ms(true, 0));
+    TEST_ASSERT_EQUAL_UINT32(60u * 60 * 1000, sync_next_delay_ms(true, 5));
 }
 
 void test_next_delay_backoff_grows_and_caps(void)
