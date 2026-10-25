@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "esp_attr.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_sntp.h"
 
@@ -30,6 +31,13 @@ clock_port_res_t clock_port_state_load(void *out, size_t cap, size_t *len)
 {
     if (cap < sizeof(s_rtc_base)) {
         return CLOCK_PORT_ERROR;
+    }
+    // RTC_NOINIT survives panic/watchdog/esp_restart too — but esp_timer
+    // restarts at 0 after any of those, so the stored uptime delta would be
+    // wrong and old ring events would be re-stamped as synced. The base is
+    // only usable straight out of deep sleep (RTC timer kept counting).
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+        return CLOCK_PORT_ABSENT;
     }
     memcpy(out, &s_rtc_base, sizeof(s_rtc_base));
     *len = sizeof(s_rtc_base);

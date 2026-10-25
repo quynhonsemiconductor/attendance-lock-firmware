@@ -55,7 +55,8 @@ void test_base_survives_deep_sleep(void)
     // keeps counting — a stamp after the wake derives from the same base.
     clock_host_set_uptime_us(100000000);
     clock_on_time_source(T_FIXTURE);
-    // "wake": the port's persisted state is still there, uptime continued.
+    clock_host_set_uptime_us(100000000 + 300 * 1000000); // uptime continued
+    clock_host_reboot_after_deep_sleep();
     TEST_ASSERT_TRUE(clock_init());
     TEST_ASSERT_TRUE(clock_synced());
     uint64_t epoch;
@@ -63,6 +64,25 @@ void test_base_survives_deep_sleep(void)
     clock_stamp(100000000ULL + 300 * 1000000, &epoch, &synced); // 5 min later
     TEST_ASSERT_TRUE(synced);
     TEST_ASSERT_EQUAL_UINT64(T_FIXTURE + 300, epoch);
+}
+
+void test_soft_restart_rejects_the_base(void)
+{
+    // BLOCKER: RTC_NOINIT survives panic/watchdog/esp_restart, but
+    // esp_timer restarts at 0 — keeping the base would re-stamp old ring
+    // events as synced with a wrong delta. Only a deep-sleep wake may keep
+    // it; a soft restart must come up unsynced and re-base.
+    clock_host_set_uptime_us(100000000);
+    clock_on_time_source(T_FIXTURE);
+    clock_host_set_uptime_us(500000); // uptime RESTARTED at ~0
+    clock_host_soft_restart();
+    TEST_ASSERT_TRUE(clock_init()); // port readable
+    TEST_ASSERT_FALSE(clock_synced()); // but the stale base is rejected
+    uint64_t epoch;
+    bool synced;
+    clock_stamp(500000, &epoch, &synced);
+    TEST_ASSERT_FALSE(synced);
+    TEST_ASSERT_EQUAL_UINT64(1, epoch); // uptime stand-in (0.5 s rounds to 1)
 }
 
 void test_power_cut_clears_the_clock(void)
@@ -128,8 +148,8 @@ void test_http_date_leap_day_and_year_bounds(void)
     TEST_ASSERT_TRUE(clock_parse_http_date("Sat, 29 Feb 2020 00:00:00 GMT", &epoch));
     TEST_ASSERT_EQUAL_UINT64(1582934400ULL, epoch);
     TEST_ASSERT_FALSE(clock_parse_http_date("Fri, 29 Feb 2021 00:00:00 GMT", &epoch));
-    TEST_ASSERT_TRUE(clock_parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT", &epoch));
-    TEST_ASSERT_EQUAL_UINT64(0, epoch);
+    TEST_ASSERT_FALSE(clock_parse_http_date("Wed, 23 Oct 2019 08:01:02 GMT", &epoch)); // pre-2020
+    TEST_ASSERT_FALSE(clock_parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT", &epoch)); // pre-2020
 }
 
 void test_iso8601_roundtrip(void)
@@ -137,7 +157,6 @@ void test_iso8601_roundtrip(void)
     const struct { const char *date; const char *iso; } samples[] = {
         { "Wed, 23 Oct 2026 08:01:02 GMT", "2026-10-23T08:01:02Z" },
         { "Sat, 29 Feb 2020 00:00:00 GMT", "2020-02-29T00:00:00Z" },
-        { "Thu, 01 Jan 1970 00:00:00 GMT", "1970-01-01T00:00:00Z" },
         { "Thu, 31 Dec 2099 23:59:59 GMT", "2099-12-31T23:59:59Z" },
     };
     for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
@@ -165,6 +184,7 @@ int main(void)
     RUN_TEST(test_unsynced_stamp_is_uptime_and_flagged);
     RUN_TEST(test_time_source_sets_base_and_stamps_derive);
     RUN_TEST(test_base_survives_deep_sleep);
+    RUN_TEST(test_soft_restart_rejects_the_base);
     RUN_TEST(test_power_cut_clears_the_clock);
     RUN_TEST(test_resync_rebases_the_stamps);
     RUN_TEST(test_http_date_fixture);

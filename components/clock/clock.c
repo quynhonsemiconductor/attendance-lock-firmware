@@ -146,7 +146,9 @@ bool clock_parse_http_date(const char *s, uint64_t *epoch_out)
         return false;
     }
     s += 4;
-    if (!parse_uint(&s, 4, &year) || year > 9999 || *s != ' ') {
+    // Before 2020 = garbage (a device built this decade); also keeps the
+    // days-from-civil result away from uint64 wrap territory.
+    if (!parse_uint(&s, 4, &year) || year < 2020 || year > 9999 || *s != ' ') {
         return false;
     }
     s++;

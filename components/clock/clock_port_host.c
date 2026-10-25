@@ -8,7 +8,8 @@
 #include <time.h>
 
 static struct {
-    bool valid;
+    bool valid;         // the persisted base is physically present
+    bool deep_sleep_wake; // true = resumed from deep sleep (uptime continued)
     uint8_t blob[64];
     size_t len;
 } s_state;
@@ -30,6 +31,11 @@ clock_port_res_t clock_port_state_load(void *out, size_t cap, size_t *len)
 {
     if (!s_state.valid) {
         return CLOCK_PORT_ABSENT; // never written = power-on state
+    }
+    if (!s_state.deep_sleep_wake) {
+        // Soft restart (panic, watchdog, esp_restart): the base is present
+        // but esp_timer restarted at 0 — stale, unusable (port contract).
+        return CLOCK_PORT_ABSENT;
     }
     if (s_state.len > cap) {
         return CLOCK_PORT_ERROR;
@@ -68,6 +74,18 @@ void clock_port_sntp_stop(void)
 void clock_host_power_loss(void)
 {
     memset(&s_state, 0, sizeof(s_state));
+}
+
+void clock_host_reboot_after_deep_sleep(void)
+{
+    s_state.valid = true; // blob already there; nothing re-stores it
+    s_state.deep_sleep_wake = true;
+}
+
+void clock_host_soft_restart(void)
+{
+    s_state.valid = true;
+    s_state.deep_sleep_wake = false;
 }
 
 void clock_host_set_epoch(uint64_t epoch)
