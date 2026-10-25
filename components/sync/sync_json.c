@@ -173,6 +173,66 @@ static bool scan_ch(scan_t *p, char c)
     return false;
 }
 
+// Skips one string literal of ANY length (ADR §2.4: unknown fields are
+// ignored — their size must not matter). Backslash escapes are stepped over.
+static bool scan_skip_string(scan_t *p)
+{
+    scan_ws(p);
+    if (!p->ok || p->i >= p->len || p->s[p->i] != '"') {
+        p->ok = false;
+        return false;
+    }
+    p->i++;
+    while (p->i < p->len) {
+        if (p->s[p->i] == '\\' && p->i + 1 < p->len) {
+            p->i += 2;
+            continue;
+        }
+        if (p->s[p->i] == '"') {
+            p->i++;
+            return true;
+        }
+        p->i++;
+    }
+    p->ok = false;
+    return false;
+}
+
+// Reads a string literal into out. A string that does not FIT is fully
+// consumed and *too_long = true (callers treat it as an unknown field);
+// malformed input is false.
+static bool scan_string_relaxed(scan_t *p, char *out, size_t cap, bool *too_long)
+{
+    scan_ws(p);
+    *too_long = false;
+    if (!p->ok || p->i >= p->len || p->s[p->i] != '"') {
+        p->ok = false;
+        return false;
+    }
+    p->i++;
+    size_t n = 0;
+    while (p->i < p->len && p->s[p->i] != '"') {
+        if (p->s[p->i] == '\\' && p->i + 1 < p->len) { // escaped char: cannot be
+            p->i += 2;                            // a known-field name/value
+            *too_long = true;
+            continue;
+        }
+        if (n + 1 < cap) {
+            out[n++] = p->s[p->i];
+        } else {
+            *too_long = true;
+        }
+        p->i++;
+    }
+    if (p->i >= p->len) {
+        p->ok = false;
+        return false;
+    }
+    p->i++; // closing quote
+    out[n < cap ? n : cap - 1] = '\0';
+    return true;
+}
+
 // Reads a string literal into out (NUL-terminated, truncation = failure).
 static bool scan_string(scan_t *p, char *out, size_t cap)
 {
@@ -230,8 +290,7 @@ static bool scan_skip_value(scan_t *p)
     }
     char c = p->s[p->i];
     if (c == '"') {
-        char sink[64]; // unknown strings longer than this: fail-closed (the
-        return scan_string(p, sink, sizeof(sink)); // contract has none)
+        return scan_skip_string(p); // any length: unknown fields are ignored
     }
     if (c == '{' || c == '[') {
         char close = c == '{' ? '}' : ']';
@@ -244,9 +303,11 @@ static bool scan_skip_value(scan_t *p)
         for (;;) {
             if (c == '{') {
                 char key[64];
-                if (!scan_string(p, key, sizeof(key)) || !scan_ch(p, ':')) {
+                bool tl;
+                if (!scan_string_relaxed(p, key, sizeof(key), &tl) || !scan_ch(p, ':')) {
                     return false;
                 }
+                (void)tl; // keys inside unknown objects are unknown too
             }
             if (!scan_skip_value(p)) {
                 return false;
@@ -315,10 +376,15 @@ size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, s
         p.i++;
     } else {
         for (;;) {
-            if (!scan_string(&p, key, sizeof(key)) || !scan_ch(&p, ':')) {
+            bool key_tl;
+            if (!scan_string_relaxed(&p, key, sizeof(key), &key_tl) || !scan_ch(&p, ':')) {
                 return SIZE_MAX;
             }
-            if (strcmp(key, "cards") == 0) {
+            if (key_tl) { // unknown key of any length: skip its value
+                if (!scan_skip_value(&p)) {
+                    return SIZE_MAX;
+                }
+            } else if (strcmp(key, "cards") == 0) {
                 scan_ws(&p);
                 if (p.i >= p.len || p.s[p.i] != '[') {
                     return SIZE_MAX;
@@ -344,10 +410,16 @@ size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out, s
                                 char uid[24] = { 0 };
                                 uint64_t win;
                                 bool is_null;
-                                if (!scan_string(&p, ck, sizeof(ck)) || !scan_ch(&p, ':')) {
+                                bool ck_tl;
+                                if (!scan_string_relaxed(&p, ck, sizeof(ck), &ck_tl) ||
+                                    !scan_ch(&p, ':')) {
                                     return SIZE_MAX;
                                 }
-                                if (strcmp(ck, "uid") == 0) {
+                                if (ck_tl) { // unknown key of any length
+                                    if (!scan_skip_value(&p)) {
+                                        return SIZE_MAX;
+                                    }
+                                } else if (strcmp(ck, "uid") == 0) {
                                     if (!scan_string(&p, uid, sizeof(uid))) {
                                         return SIZE_MAX;
                                     }
@@ -452,10 +524,15 @@ bool sync_decode_events_response(const char *body, size_t len, uint32_t *acked_t
         return false; // acked_through is required
     }
     for (;;) {
-        if (!scan_string(&p, key, sizeof(key)) || !scan_ch(&p, ':')) {
+        bool key_tl;
+        if (!scan_string_relaxed(&p, key, sizeof(key), &key_tl) || !scan_ch(&p, ':')) {
             return false;
         }
-        if (strcmp(key, "acked_through") == 0) {
+        if (key_tl) { // unknown key of any length: skip its value
+            if (!scan_skip_value(&p)) {
+                return false;
+            }
+        } else if (strcmp(key, "acked_through") == 0) {
             uint64_t v;
             if (!scan_uint(&p, &v) || v > UINT32_MAX) {
                 return false;

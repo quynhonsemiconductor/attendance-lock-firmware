@@ -58,11 +58,10 @@ static bool nvs_ready(void)
     }
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // Standard IDF recovery. With the prod profile the NVS is encrypted,
-        // so this erase only happens on a version/layout change — the
-        // allow-list cache and stream UUID are re-synced/regenerated.
-        nvs_flash_erase();
-        e = nvs_flash_init();
+        // NEVER wipe here: the allow-list cache and the stream UUID live in
+        // this partition, and wiping would change the stream identity.
+        // Only the explicit factory-reset console command erases NVS.
+        return false;
     }
     done = (e == ESP_OK);
     return done;

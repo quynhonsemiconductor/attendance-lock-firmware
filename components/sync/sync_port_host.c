@@ -69,8 +69,9 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     *resp_len = 0;
     if (resp != NULL && r.body != NULL) {
         size_t n = strlen(r.body);
-        if (n > cap) {
-            n = cap;
+        if (n >= cap) {
+            return false; // same semantics as the device port: an oversized
+                          // body is a transport failure, never a truncated 200
         }
         memcpy(resp, r.body, n);
         *resp_len = n;

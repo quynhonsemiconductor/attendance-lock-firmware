@@ -12,7 +12,19 @@
 #include "store/store.h"
 #include "sync_port.h"
 
-#define RESP_CAP 4096
+#ifndef SYNC_HOST_BUILD
+#include "esp_log.h"
+static const char *TAG = "sync";
+#define SYNC_LOGW(...) ESP_LOGW(TAG, __VA_ARGS__)
+#else
+#define SYNC_LOGW(...) do { } while (0)
+#endif
+
+// Response buffers: 16 KiB covers STORE_CARDS_MAX cards' JSON with margin
+// (the card cap is shared between the decoder and the cache); post_resp is
+// sized per review for the ack/reject body. Static: sync-task-owned.
+#define RESP_CAP (16 * 1024)
+#define POST_RESP_CAP 2048
 
 // Session buffers: file-scope, never on the sync task's stack; all uses are
 // single-task (the door task never touches the store via this path).
@@ -56,21 +68,32 @@ bool sync_session_run(void)
     } else if (status == 200) {
         size_t n = sync_decode_allow_list(s_resp, resp_len, s_cards,
                                           sizeof(s_cards) / sizeof(s_cards[0]));
-        if (n == SIZE_MAX ||
-            store_allow_list_replace(s_cards, n, resp_etag, strlen(resp_etag)) != STORE_OK) {
+        if (n == SIZE_MAX) {
+            SYNC_LOGW("allow-list body malformed (len=%u)", (unsigned)resp_len);
+            ok = false;
+        } else if (n > STORE_CARDS_MAX) {
+            SYNC_LOGW("allow-list too large: count=%u", (unsigned)n);
+            ok = false;
+        } else if (store_allow_list_replace(s_cards, n, resp_etag, strlen(resp_etag)) !=
+                   STORE_OK) {
+            SYNC_LOGW("allow-list cache write failed");
             ok = false; // loud: the old cache stays, sync flags it upstream
         }
     } else if (status == 304) {
         // unchanged — the cached list stays active (§2.4)
     } else if (status == 401 || status == 403) {
-        ok = false; // credentials refused: retry next session, log upstream
+        SYNC_LOGW("terminal credentials refused: status=%ld", status);
+        ok = false; // credentials refused: retry next session
     } else {
         ok = false; // 5xx / anything else: keep state
     }
 
-    // Date-header fallback: any response carries it (§2.4) — use it when the
-    // clock is still unsynced, BEFORE the events are stamped.
-    if (!clock_synced() && date[0] != '\0') {
+    // Re-base EVERY session (drift correction): SNTP time wins when the
+    // system clock is past the floor, otherwise the Date header — before
+    // the events are stamped.
+    if (clock_system_epoch() >= CLOCK_SNTP_EPOCH_FLOOR) {
+        clock_on_time_source(clock_system_epoch());
+    } else if (date[0] != '\0') {
         uint64_t epoch;
         if (clock_parse_http_date(date, &epoch)) {
             clock_on_time_source(epoch);
@@ -83,9 +106,29 @@ bool sync_session_run(void)
     if (n > 0 || dropped > 0) {
         uint8_t stream[16];
         store_stream_uuid(stream);
-        size_t body_len = sync_encode_envelope(stream, dropped, s_batch, n, s_body, sizeof(s_body));
+        // A record that fails to encode (corrupt payload) is dropped and
+        // counted locally — it must never block the queue (§2.4). It is
+        // excluded from the envelope here and deleted together with the
+        // ack below; a repeated failure over-counts drops once per session.
+        size_t n_good = 0;
+        uint32_t bad_max_seq = 0;
+        static char s_ev_probe[256];
+        for (size_t i = 0; i < n; i++) {
+            if (sync_encode_event((const sync_event_t *)s_batch[i].bytes, s_batch[i].seq,
+                                  s_ev_probe, sizeof(s_ev_probe)) == 0) {
+                dropped++;
+                if (s_batch[i].seq > bad_max_seq) {
+                    bad_max_seq = s_batch[i].seq;
+                }
+                SYNC_LOGW("event encode failed: seq=%u", s_batch[i].seq);
+                continue;
+            }
+            s_batch[n_good++] = s_batch[i];
+        }
+        size_t body_len = sync_encode_envelope(stream, dropped, s_batch, n_good, s_body,
+                                               sizeof(s_body));
         long post_status = 0;
-        char post_resp[512];
+        static char post_resp[POST_RESP_CAP];
         size_t post_resp_len = 0;
         if (body_len == 0 ||
             !sync_port_http("POST", url, "/v1/door/terminal/events", token, "", s_body, body_len,
@@ -100,10 +143,19 @@ bool sync_session_run(void)
                                              &rejected_len)) {
                 ok = false; // malformed 200: resend is free (ON CONFLICT DO NOTHING)
             } else {
+                // Never ack past what this batch actually carried.
+                uint32_t batch_max = n_good > 0 ? s_batch[n_good - 1].seq : 0;
+                if (bad_max_seq > batch_max) {
+                    batch_max = bad_max_seq;
+                }
+                if (acked > batch_max) {
+                    acked = batch_max;
+                }
                 store_ack(acked); // accepted AND rejected seqs die together
                 store_dropped_ack(dropped); // only after the 200
-                // s_rejected[] seqs are already deleted here — one bad event
-                // never blocks the queue (§2.4); the count is for logging.
+                if (rejected_len > 0) {
+                    SYNC_LOGW("events rejected: count=%u", (unsigned)rejected_len);
+                }
             }
         } else {
             ok = false;

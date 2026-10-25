@@ -58,7 +58,8 @@ target_include_directories(host_tests_sync PRIVATE
   ../../components/store/include
   ../../components/clock/include)
 target_compile_definitions(host_tests_sync PRIVATE
-  FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/contract-v1")
+  FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/contract-v1"
+  SYNC_HOST_BUILD)
 target_link_libraries(host_tests_sync PRIVATE unity)
 
 enable_testing()

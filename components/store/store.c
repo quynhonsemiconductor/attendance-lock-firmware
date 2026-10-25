@@ -563,9 +563,10 @@ bool store_event_push(const uint8_t *event, size_t len, uint32_t *seq_out)
             if (!ring_advance(&full)) {
                 if (full) {
                     // Ring full: the door keeps working, the event is dropped
-                    // and counted (§2.4). Persisted until the count is sent.
+                    // and counted (§2.4). RAM-only here — persisting per
+                    // dropped event is flash wear; the sync session flushes
+                    // the count to NVS when it reads it for the next upload.
                     dropped++;
-                    store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
                 }
                 break;
             }
@@ -577,7 +578,7 @@ bool store_event_push(const uint8_t *event, size_t len, uint32_t *seq_out)
             // might REUSE this seq (silently dropped server-side). Treat the
             // push as failed and count it — staying silent is worse (§2.4).
             dropped++;
-            store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
+            store_port_nvs_set_u32(NVS_KEY_DROP, dropped); // rare: poison record
             break;
         }
         uint8_t r[REC_SIZE];
@@ -667,6 +668,10 @@ void store_ack(uint32_t acked_through)
 
 uint32_t store_dropped_count(void)
 {
+    // Read == flush point: the sync session reads this before each upload,
+    // which is the cadence the count is persisted at (a crash before then
+    // only under-reports drops, never loses queued events).
+    store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
     return dropped;
 }
 

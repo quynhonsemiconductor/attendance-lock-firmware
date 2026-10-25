@@ -364,13 +364,17 @@ void test_full_ring_drops_and_counts(void)
     TEST_ASSERT_TRUE(store_event_push(in, sizeof(in), NULL));
 }
 
-void test_dropped_survives_reboot_until_acked(void)
+void test_dropped_persisted_at_the_sync_read_point(void)
 {
+    // Drop counting is RAM + cadence-persisted (per-event NVS writes would
+    // be flash wear): the flush point is the sync task's read before each
+    // upload — a reboot after that read still reports the drops.
     uint8_t in[4];
     fill(in, sizeof(in), 1);
     for (size_t i = 0; i < CAPACITY + 2; i++) {
         (void)store_event_push(in, sizeof(in), NULL);
     }
+    TEST_ASSERT_EQUAL_UINT32(2, store_dropped_count()); // read == flush point
     TEST_ASSERT_TRUE(store_init()); // reboot before the batch was sent
     TEST_ASSERT_EQUAL_UINT32(2, store_dropped_count());
     store_dropped_ack(2);
@@ -448,7 +452,7 @@ int main(void)
     RUN_TEST(test_fault_seq_persist_fails_push_fails_and_counts);
     RUN_TEST(test_fault_nvs_blob_replace_interrupted_keeps_old);
     RUN_TEST(test_full_ring_drops_and_counts);
-    RUN_TEST(test_dropped_survives_reboot_until_acked);
+    RUN_TEST(test_dropped_persisted_at_the_sync_read_point);
     RUN_TEST(test_seq_block_persisted_ahead_of_use);
     RUN_TEST(test_nvs_wipe_new_stream_no_seq_reuse);
     RUN_TEST(test_stream_uuid_regenerated_after_nvs_wipe);

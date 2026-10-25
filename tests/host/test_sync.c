@@ -336,6 +336,99 @@ void test_session_transport_failure_keeps_state(void)
     TEST_ASSERT_EQUAL_size_t(1, store_event_batch(out, 10));
 }
 
+void test_session_oversized_body_is_transport_failure(void)
+{
+    // A body that does not fit the response buffer must FAIL, never arrive
+    // as a silently truncated 200 (a truncated allow-list would freeze
+    // revocations). The buffer is sized for STORE_CARDS_MAX cards; this
+    // body is bigger.
+    static char big[20 * 1024];
+    memset(big, 'x', sizeof(big) - 1);
+    sync_host_enqueue(200, big, NULL, NULL);
+    TEST_ASSERT_FALSE(sync_session_run());
+}
+
+void test_session_clamps_ack_to_the_batch(void)
+{
+    uint8_t payload[21];
+    sync_event_t ev = fixture_event();
+    memcpy(payload, &ev, sizeof(ev));
+    for (uint32_t i = 0; i < 150; i++) { // two batches' worth
+        TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL));
+    }
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":4294967295,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    // A hostile/buggy acked_through must not delete the unqueued 50.
+    store_event_t out[STORE_BATCH_MAX];
+    size_t n = store_event_batch(out, 10);
+    TEST_ASSERT_EQUAL_size_t(10, n);
+    TEST_ASSERT_EQUAL_UINT32(101, out[0].seq);
+}
+
+void test_session_poison_record_dropped_not_blocking(void)
+{
+    uint8_t payload[21];
+    sync_event_t ev = fixture_event();
+    memcpy(payload, &ev, sizeof(ev));
+    TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL)); // seq 1
+    TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL)); // seq 2
+    uint8_t poison[21];
+    sync_event_t bad = { 0 }; // uid_len 0: fails to encode
+    memcpy(poison, &bad, sizeof(bad));
+    TEST_ASSERT_TRUE(store_event_push(poison, sizeof(poison), NULL)); // seq 3
+    TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL)); // seq 4
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":4,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    // The envelope carried the 3 good records, not the poison.
+    TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"seq\":4") != NULL);
+    // The poison was dropped+counted, and everything through seq 4 is gone:
+    // the queue is empty — a bad record never blocks it (§2.4).
+    store_event_t out[STORE_BATCH_MAX];
+    TEST_ASSERT_EQUAL_size_t(0, store_event_batch(out, 10));
+    // The poison's drop went out WITH the batch and was acked with it.
+    TEST_ASSERT_EQUAL_UINT32(0, store_dropped_count());
+}
+
+void test_session_rebases_every_session(void)
+{
+    // Drift correction: SNTP (system clock past the floor) re-bases EVERY
+    // session, not just the first.
+    clock_host_set_epoch(1792742462ULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL,
+                      "Wed, 23 Oct 2026 08:01:02 GMT");
+    TEST_ASSERT_TRUE(sync_session_run());
+    uint64_t epoch;
+    bool synced;
+    clock_stamp(clock_uptime_us(), &epoch, &synced);
+    TEST_ASSERT_TRUE(synced);
+    TEST_ASSERT_EQUAL_UINT64(1792742462ULL, epoch);
+    // Next session: the system clock moved on (SNTP), the Date header is
+    // stale — the SNTP time must win.
+    clock_host_set_epoch(1792742462ULL + 600);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL,
+                      "Wed, 23 Oct 2026 08:01:02 GMT");
+    TEST_ASSERT_TRUE(sync_session_run());
+    clock_stamp(clock_uptime_us(), &epoch, &synced);
+    TEST_ASSERT_EQUAL_UINT64(1792742462ULL + 600, epoch);
+}
+
+void test_decode_allow_list_long_unknown_keys_and_strings(void)
+{
+    // ADR §2.4: unknown fields are ignored — their LENGTH must not matter.
+    static char body[20000];
+    snprintf(body, sizeof(body),
+             "{\"%6000s\":true,\"cards\":[{\"uid\":\"04A1B2C3\",\"%3000s\":"
+             "\"%3000s\",\"note\":\"ok\"}],\"tail\":\"%5000s\"}",
+             "K", "K", "V", "V");
+    store_card_t cards[8];
+    size_t n = sync_decode_allow_list(body, strlen(body), cards, 8);
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX, n);
+    TEST_ASSERT_EQUAL_size_t(1, n);
+    TEST_ASSERT_EQUAL_UINT8(0x04, cards[0].uid[0]);
+}
+
 void test_session_unprovisioned_skips_everything(void)
 {
     sync_host_set_provisioned(false);
@@ -410,6 +503,11 @@ int main(void)
     RUN_TEST(test_session_reports_dropped_and_acks_it);
     RUN_TEST(test_session_failed_post_keeps_batch_and_dropped);
     RUN_TEST(test_session_transport_failure_keeps_state);
+    RUN_TEST(test_session_oversized_body_is_transport_failure);
+    RUN_TEST(test_session_clamps_ack_to_the_batch);
+    RUN_TEST(test_session_poison_record_dropped_not_blocking);
+    RUN_TEST(test_session_rebases_every_session);
+    RUN_TEST(test_decode_allow_list_long_unknown_keys_and_strings);
     RUN_TEST(test_session_unprovisioned_skips_everything);
     RUN_TEST(test_session_401_keeps_events_queued);
     RUN_TEST(test_session_uses_date_header_when_unsynced);
