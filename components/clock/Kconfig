@@ -1,0 +1,16 @@
+menu "Clock"
+
+config CLOCK_SNTP_SERVER
+    string "Primary NTP server"
+    default "time.cloudflare.com"
+    help
+        The bounded sync session starts SNTP against this server and stops
+        it again before the radio goes off (deep-sleep design).
+
+config CLOCK_SNTP_SERVER_FALLBACK
+    string "Fallback NTP server (empty = none)"
+    default ""
+    help
+        Queried only when the primary is unreachable during the session.
+
+endmenu
