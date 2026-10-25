@@ -5,6 +5,7 @@
 
 #include <string.h>
 
+#include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_random.h"
@@ -13,6 +14,8 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+#include "sync/sync.h"
 
 #define NS "prov"
 #define UA_BASE "qnsc-door-terminal/"
@@ -139,13 +142,12 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
             resp[read_total] = '\0';
             *resp_len = (size_t)read_total;
         }
-        char hdr[128];
-        if (etag != NULL &&
-            esp_http_client_get_header(c, "ETag", (const char **)&hdr) == ESP_OK && hdr) {
+        const char *hdr = NULL;
+        if (etag != NULL && esp_http_client_get_header(c, "ETag", &hdr) == ESP_OK && hdr) {
             snprintf(etag, etag_cap, "%s", hdr);
         }
-        if (date != NULL &&
-            esp_http_client_get_header(c, "Date", (const char **)&hdr) == ESP_OK && hdr) {
+        hdr = NULL;
+        if (date != NULL && esp_http_client_get_header(c, "Date", &hdr) == ESP_OK && hdr) {
             snprintf(date, date_cap, "%s", hdr);
         }
         ok = true;
