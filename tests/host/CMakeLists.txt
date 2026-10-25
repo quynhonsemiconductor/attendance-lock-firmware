@@ -18,6 +18,11 @@ set(STORE_SOURCES
   ../../components/store/store_port_host.c)
 include_directories(../../components/store) # store_port.h / store_port_host.h
 
+set(CLOCK_SOURCES
+  ../../components/clock/clock.c
+  ../../components/clock/clock_port_host.c)
+include_directories(../../components/clock) # clock_port.h / clock_port_host.h
+
 add_executable(host_tests_ring
   test_store_ring.c
   ${STORE_SOURCES})
@@ -30,6 +35,13 @@ add_executable(host_tests_alist
 target_include_directories(host_tests_alist PRIVATE ../../components/store/include)
 target_link_libraries(host_tests_alist PRIVATE unity)
 
+add_executable(host_tests_clock
+  test_clock.c
+  ${CLOCK_SOURCES})
+target_include_directories(host_tests_clock PRIVATE ../../components/clock/include)
+target_link_libraries(host_tests_clock PRIVATE unity)
+
 enable_testing()
 add_test(NAME store_ring COMMAND host_tests_ring)
 add_test(NAME store_alist COMMAND host_tests_alist)
+add_test(NAME clock COMMAND host_tests_clock)
