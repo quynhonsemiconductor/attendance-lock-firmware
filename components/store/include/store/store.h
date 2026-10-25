@@ -37,12 +37,12 @@ extern "C" {
 // ETag of the last accepted allow-list (opaque server string, §2.4).
 #define STORE_ETAG_MAX 64
 
-// Upper bound for the cached allow-list blob (NVS partition is 64 KiB so a
-// replace has headroom for both copies). STORE_CARDS_MAX entries fit;
-// more are refused loudly (STORE_ERR_TOO_MANY) — the old list staying active
-// must never be silent, or revocations would stop flowing.
-#define STORE_ALLOW_LIST_MAX (16 * 1024)
-#define STORE_CARDS_MAX ((STORE_ALLOW_LIST_MAX - 9 - STORE_ETAG_MAX) / 20)
+// Card cap, shared by the NVS cache AND the JSON decoder (one number: the
+// decoder refuses a body with more cards than the cache can hold, and the
+// sync response buffer is sized for this many cards' JSON).
+// More are refused loudly (STORE_ERR_TOO_MANY) — the old list staying
+// active must never be silent, or revocations would stop flowing.
+#define STORE_CARDS_MAX 256
 
 // One buffered event as returned by store_event_batch(): an assigned seq,
 // the payload that was pushed, and its length.

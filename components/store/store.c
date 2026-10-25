@@ -489,9 +489,18 @@ store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t
     if (etag_len_out != NULL) {
         *etag_len_out = etag_len;
     }
-    if (too_small != STORE_OK || st != STORE_OK) {
+    if (st != STORE_OK) {
         store_port_unlock();
-        return too_small != STORE_OK ? too_small : st;
+        return st;
+    }
+    // Each out-buffer that fits is filled even on TOO_SMALL — callers that
+    // only want the ETag (If-None-Match) pass max_cards = 0.
+    if (etag != NULL && etag_len <= etag_cap) {
+        memcpy(etag, &al_blob[9], etag_len);
+    }
+    if (too_small != STORE_OK) {
+        store_port_unlock();
+        return too_small;
     }
     if (out != NULL) {
         const uint8_t *e = &al_blob[9 + etag_len];
@@ -502,9 +511,6 @@ store_status_t store_allow_list_read(store_card_t *out, size_t max_cards, size_t
             out[i].valid_until = get_u32le(&e[15]);
             e += 20;
         }
-    }
-    if (etag != NULL) {
-        memcpy(etag, &al_blob[9], etag_len);
     }
     store_port_unlock();
     return STORE_OK;
@@ -557,9 +563,10 @@ bool store_event_push(const uint8_t *event, size_t len, uint32_t *seq_out)
             if (!ring_advance(&full)) {
                 if (full) {
                     // Ring full: the door keeps working, the event is dropped
-                    // and counted (§2.4). Persisted until the count is sent.
+                    // and counted (§2.4). RAM-only here — persisting per
+                    // dropped event is flash wear; the sync session flushes
+                    // the count to NVS when it reads it for the next upload.
                     dropped++;
-                    store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
                 }
                 break;
             }
@@ -571,7 +578,7 @@ bool store_event_push(const uint8_t *event, size_t len, uint32_t *seq_out)
             // might REUSE this seq (silently dropped server-side). Treat the
             // push as failed and count it — staying silent is worse (§2.4).
             dropped++;
-            store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
+            store_port_nvs_set_u32(NVS_KEY_DROP, dropped); // rare: poison record
             break;
         }
         uint8_t r[REC_SIZE];
@@ -661,6 +668,10 @@ void store_ack(uint32_t acked_through)
 
 uint32_t store_dropped_count(void)
 {
+    // Read == flush point: the sync session reads this before each upload,
+    // which is the cadence the count is persisted at (a crash before then
+    // only under-reports drops, never loses queued events).
+    store_port_nvs_set_u32(NVS_KEY_DROP, dropped);
     return dropped;
 }
 

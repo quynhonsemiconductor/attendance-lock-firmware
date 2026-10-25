@@ -1,0 +1,40 @@
+#pragma once
+// Platform port for the sync component: credentials, radio, HTTP. The
+// session logic (sync.c) is platform-free and host-tested against a
+// scripted transport.
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+// Provisioned credentials (base URL without trailing slash, bearer token).
+// False when the device is not yet provisioned — the session skips.
+bool sync_port_creds(char *url, size_t url_cap, char *token, size_t token_cap);
+
+// Radio: bring the station up (blocks until it has an IP or fails) and take
+// it back down. False = no network this session (normal: the door works
+// offline, §2.1).
+bool sync_port_wifi_up(void);
+void sync_port_wifi_down(void);
+
+// One HTTPS exchange against <url><path>. Headers sent: Authorization
+// (Bearer token), User-Agent (qnsc-door-terminal/<version>),
+// If-None-Match when if_none_match[0] != '\0', Content-Type for a body.
+// Response: status, body (up to cap), ETag and Date response headers.
+// TLS: esp_crt_bundle on the device; false = transport failure (no HTTP
+// status), never a 4xx/5xx.
+bool sync_port_http(const char *method, const char *url, const char *path, const char *token,
+                    const char *if_none_match, const char *body, size_t body_len,
+                    long *status, char *resp, size_t cap, size_t *resp_len, char *etag,
+                    size_t etag_cap, char *date, size_t date_cap);
+
+// 32 random bits (backoff jitter).
+uint32_t sync_port_random_u32(void);
+
+// Sleeps ms milliseconds (between sessions — never called with the radio up
+// and the door task waiting on us).
+void sync_port_delay_ms(uint32_t ms);
+
+// Spawn the session task (device build; host tests call sync_session_run
+// directly). The task runs one bounded session per Kconfig interval.
+void sync_port_task_start(void);

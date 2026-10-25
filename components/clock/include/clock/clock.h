@@ -60,6 +60,15 @@ bool clock_parse_http_date(const char *s, uint64_t *epoch_out);
 // always UTC, out needs ≥ 21 bytes).
 void clock_iso8601(uint64_t epoch, char *out, size_t cap);
 
+// Wall-clock epoch seconds from the system clock (SNTP writes it behind
+// the scenes); below this the caller treats it as "no SNTP time yet".
+#define CLOCK_SNTP_EPOCH_FLOOR 1577836800ULL // 2020-01-01
+
+// System-clock epoch seconds (device: settimeofday via SNTP; host tests:
+// injected). Used by the sync session to re-base EVERY session — SNTP drift
+// correction, not a one-shot first-sync.
+uint64_t clock_system_epoch(void);
+
 // Bounded SNTP session: start before the sync window, stop before the
 // radio goes off (no long-lived connections, deep-sleep design). Servers
 // come from Kconfig (default time.cloudflare.com).

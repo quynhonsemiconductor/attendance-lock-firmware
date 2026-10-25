@@ -1,0 +1,12 @@
+menu "Sync"
+
+config SYNC_INTERVAL_MIN
+    int "Minutes between sync sessions"
+    default 30
+    range 1 1440
+    help
+        The bounded session (Wi-Fi up, SNTP, allow-list poll, event upload,
+        Wi-Fi down) runs once per interval. Designed so the main loop can
+        replace the delay with a deep-sleep timer wake.
+
+endmenu

@@ -22,6 +22,7 @@ set(CLOCK_SOURCES
   ../../components/clock/clock.c
   ../../components/clock/clock_port_host.c)
 include_directories(../../components/clock) # clock_port.h / clock_port_host.h
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}) # host sdkconfig.h stand-in
 
 add_executable(host_tests_ring
   test_store_ring.c
@@ -41,7 +42,28 @@ add_executable(host_tests_clock
 target_include_directories(host_tests_clock PRIVATE ../../components/clock/include)
 target_link_libraries(host_tests_clock PRIVATE unity)
 
+set(SYNC_SOURCES
+  ../../components/sync/sync.c
+  ../../components/sync/sync_json.c
+  ../../components/sync/sync_port_host.c
+  ${STORE_SOURCES}
+  ${CLOCK_SOURCES})
+include_directories(../../components/sync) # sync_port.h / sync_port_host.h
+
+add_executable(host_tests_sync
+  test_sync.c
+  ${SYNC_SOURCES})
+target_include_directories(host_tests_sync PRIVATE
+  ../../components/sync/include
+  ../../components/store/include
+  ../../components/clock/include)
+target_compile_definitions(host_tests_sync PRIVATE
+  FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/contract-v1"
+  SYNC_HOST_BUILD)
+target_link_libraries(host_tests_sync PRIVATE unity)
+
 enable_testing()
 add_test(NAME store_ring COMMAND host_tests_ring)
 add_test(NAME store_alist COMMAND host_tests_alist)
 add_test(NAME clock COMMAND host_tests_clock)
+add_test(NAME sync COMMAND host_tests_sync)
