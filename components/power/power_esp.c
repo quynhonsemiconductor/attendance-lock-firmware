@@ -109,12 +109,6 @@ bool power_low_battery(void)
     return power_is_low(power_battery_mv(), CONFIG_POWER_BATTERY_LOW_MV);
 }
 
-bool power_release_denied(void)
-{
-    return power_should_deny(power_battery_mv(), CONFIG_POWER_BATTERY_CUTOFF_MV,
-                             CONFIG_POWER_BATTERY_DENY_MARGIN_MV);
-}
-
 uint32_t power_brownout_count(void)
 {
     return s_brownout.magic == BROWNOUT_MAGIC ? s_brownout.st.count : 0;

@@ -23,10 +23,6 @@ uint32_t power_battery_mv(void);
 // True when battery_mv is below the low-battery threshold (report only).
 bool power_low_battery(void);
 
-// True when battery_mv sits under cutoff+margin: a release would brown the
-// rail out — the door must stay locked and say why.
-bool power_release_denied(void);
-
 // Consecutive brownout resets seen since the last clean power-on.
 uint32_t power_brownout_count(void);
 
