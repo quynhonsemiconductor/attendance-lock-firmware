@@ -1,0 +1,41 @@
+menu "Lock"
+
+config LOCK_BACKEND
+    int "Lock backend (0 = relay/strike, 1 = servo bolt)"
+    default 1
+    range 0 1
+
+config LOCK_RELAY_GPIO
+    int "Relay GPIO"
+    default 4
+
+config LOCK_RELAY_ACTIVE
+    int "Relay active level (1 = high)"
+    default 1
+    range 0 1
+
+config LOCK_SERVO_GPIO
+    int "Servo signal GPIO"
+    default 4
+
+config LOCK_SERVO_FREQ
+    int "Servo PWM frequency (Hz)"
+    default 50
+
+config LOCK_SERVO_LOCK_US
+    int "Servo pulse at the LOCKED position (µs)"
+    default 1000
+
+config LOCK_SERVO_UNLOCK_US
+    int "Servo pulse at the RELEASED position (µs)"
+    default 2000
+
+config LOCK_SERVO_MOVE_MS
+    int "Servo travel time (ms the pulse is held)"
+    default 700
+
+config LOCK_SERVO_RELEASE
+    bool "Release the servo signal after the move (no holding current)"
+    default y
+
+endmenu
