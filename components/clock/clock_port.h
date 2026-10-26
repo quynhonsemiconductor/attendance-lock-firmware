@@ -11,6 +11,24 @@
 // uptime is continuous across a deep-sleep cycle.
 int64_t clock_port_uptime_us(void);
 
+// The persisted clock state — ONE definition shared by clock.c (logic) and
+// the ESP port (RTC layout). Field order/layout matters for the RTC blob.
+typedef struct {
+    uint32_t magic;        // BASE_MAGIC
+    uint32_t boot_magic;   // BOOT_MAGIC (valid boot id inside)
+    uint32_t cur_boot_id;  // this power segment's id
+    uint8_t cur_valid;     // current segment has a synced base
+    uint8_t prev_valid;    // previous segment's base kept across a soft restart
+    uint32_t prev_boot_id; // the segment that ran before the restart
+    uint64_t cur_epoch;
+    int64_t cur_uptime_us;
+    uint64_t prev_epoch;
+    int64_t prev_uptime_us;
+} clock_state_t;
+
+// Logged when persisting the state fails (device: ESP_LOGE; host: silent).
+void clock_port_log(const char *msg);
+
 // Tri-state: a missing state is a normal state (power-on); a backend
 // failure is not.
 typedef enum {

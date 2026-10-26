@@ -10,13 +10,18 @@
 static struct {
     bool valid;           // the persisted state is physically present
     bool deep_sleep_wake; // true = resumed from deep sleep (uptime continued)
-    uint8_t blob[128];
+    uint8_t blob[sizeof(clock_state_t)];
     size_t len;
 } s_state;
 
 static uint64_t injected_epoch = 0;    // "system clock" the tests control
 static uint64_t rng_state = 0xDEADBEEFu; // separate: random must not touch the clock
 int64_t clock_host_override_us = INT64_MIN; // "uptime" the tests control
+
+void clock_port_log(const char *msg)
+{
+    (void)msg;
+}
 
 int64_t clock_port_uptime_us(void)
 {
