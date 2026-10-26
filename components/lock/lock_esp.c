@@ -1,5 +1,5 @@
 // Device wiring: relay GPIO or servo on LEDC. Build only on ESP-IDF.
-#include "lock_esp.h"
+#include "lock/lock_esp.h"
 
 #include <stdbool.h>
 
@@ -8,12 +8,14 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 
+#include "lock/lock_math.h"
+
 #include "sdkconfig.h"
 
 static const char *TAG = "lock";
 static esp_timer_handle_t s_release_timer;
 
-#if CONFIG_LOCK_BACKEND == LOCK_BACKEND_SERVO
+#if CONFIG_LOCK_BACKEND_SERVO
 static void release_cb(void *arg)
 {
     (void)arg;
@@ -26,7 +28,7 @@ static void release_cb(void *arg)
 
 void lock_esp_init(void)
 {
-#if CONFIG_LOCK_BACKEND == LOCK_BACKEND_SERVO
+#if CONFIG_LOCK_BACKEND_SERVO
     ledc_timer_config_t timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_14_BIT,
@@ -70,28 +72,32 @@ void lock_esp_init(void)
 #endif
 }
 
+#if CONFIG_LOCK_BACKEND_RELAY
 void lock_esp_relay_write(int level)
 {
     gpio_set_level(CONFIG_LOCK_RELAY_GPIO,
                    level ? (CONFIG_LOCK_RELAY_ACTIVE ? 1 : 0)
                          : (CONFIG_LOCK_RELAY_ACTIVE ? 0 : 1));
 }
+#endif
 
+#if CONFIG_LOCK_BACKEND_SERVO
 void lock_esp_servo_write(uint32_t pulse_us)
 {
-    // 50 Hz servo on a 14-bit LEDC: duty = pulse/period * max_ticks.
-    const uint32_t resolution = 14;
-    uint32_t max_ticks = (1u << resolution) - 1;
-    uint64_t duty =
-        ((uint64_t)pulse_us * max_ticks + (1000000u / CONFIG_LOCK_SERVO_FREQ) / 2) /
-        (1000000u / CONFIG_LOCK_SERVO_FREQ);
-    if (duty > max_ticks) {
-        duty = max_ticks;
-    }
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (uint32_t)duty);
+    // The host-tested math (lock_math.c) sizes the duty; clamping lives
+    // there, not twice.
+    uint32_t duty =
+        lock_servo_duty_ticks(pulse_us, CONFIG_LOCK_SERVO_FREQ, 14);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-    if (s_release_timer != NULL) {
-        esp_timer_stop(s_release_timer); // restartable: engage→release→engage
-        esp_timer_start_once(s_release_timer, (uint64_t)move_ms * 1000);
-    }
 }
+
+void lock_esp_servo_release_after(uint32_t move_ms)
+{
+    if (s_release_timer == NULL) {
+        return;
+    }
+    esp_timer_stop(s_release_timer); // restartable: engage→release→engage
+    esp_timer_start_once(s_release_timer, (uint64_t)move_ms * 1000);
+}
+#endif

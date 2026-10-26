@@ -1,9 +1,16 @@
 menu "Lock"
 
-config LOCK_BACKEND
-    int "Lock backend (0 = relay/strike, 1 = servo bolt)"
-    default 1
-    range 0 1
+choice LOCK_BACKEND
+    prompt "Lock backend"
+    default LOCK_BACKEND_SERVO
+
+config LOCK_BACKEND_RELAY
+    bool "Relay / strike driver"
+
+config LOCK_BACKEND_SERVO
+    bool "Servo bolt (LEDC PWM)"
+
+endchoice
 
 config LOCK_RELAY_GPIO
     int "Relay GPIO"

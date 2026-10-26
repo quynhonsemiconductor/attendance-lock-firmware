@@ -15,11 +15,6 @@
 extern "C" {
 #endif
 
-// Pulse (µs) → LEDC duty ticks at freq_hz/resolution bits. Rounds to
-// nearest; clamped to [0, max_ticks]. Host-testable pulse math (the
-// prototype's `us * ((1 << RES) - 1) / (1000000 / FREQ)`).
-uint32_t lock_servo_duty_ticks(uint32_t pulse_us, uint32_t freq_hz, uint32_t resolution_bits);
-
 // Brings the output up and ENGAGES (fail-secure boot state, §2.8).
 void lock_init(void);
 
