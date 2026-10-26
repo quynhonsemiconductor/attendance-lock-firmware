@@ -1,6 +1,6 @@
 # door terminal contract v1 fixtures
 
-Copied verbatim from the opshub repository
+Derived from the opshub repository
 (docs/contracts/door-terminal-v1/) — the wire contract the sync component
 encodes and decodes (ADR §2.4). The host tests compare real
 encode/decode output against these files.

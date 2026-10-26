@@ -150,6 +150,7 @@ void test_battery_deny_does_not_slam_an_open_window(void)
     (void)door_fsm_apply(&fsm, 1000, DOOR_ALLOW);
     door_out_t out = door_fsm_apply(&fsm, 2000, DOOR_DENY_BATTERY);
     TEST_ASSERT_TRUE(out.release); // still released
+    TEST_ASSERT_FALSE(out.engage); // and the caller must NOT re-engage it
     TEST_ASSERT_TRUE(out.green);
     out = door_fsm_tick(&fsm, 1000 + HOLD_MS);
     TEST_ASSERT_TRUE(out.engage);

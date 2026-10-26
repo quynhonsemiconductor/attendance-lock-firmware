@@ -25,11 +25,18 @@ bool rc522_init(const rc522_conf_t *conf);
 // holding the init value (0xA9). 0x00/0xFF = nothing on the bus.
 bool rc522_healthy(const rc522_conf_t *conf);
 
+typedef enum {
+    RC522_NONE = 0, // powered the reader, no card in the field
+    RC522_CARD,     // uid/uid_len filled (4 bytes)
+    RC522_FAULT,    // the reader did not come up (health check failed)
+} rc522_poll_result_t;
+
 // One poll: wake from hard power-down (self-resets the chip — the init
-// re-runs), REQIDL, anticoll, select, halt. True with a 4-byte UID when a
-// card answered; false otherwise (also "no card"). 7/10-byte cascade UIDs
-// are rejected (skipped) until CL2 exists.
-bool rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len);
+// re-runs), REQIDL, anticoll, select, halt. "No card" and "dead reader"
+// are DIFFERENT answers: only a failed health check (VersionReg) is a
+// fault — an empty field is a normal poll. 7/10-byte cascade UIDs are
+// rejected (skipped) until CL2 exists.
+rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len);
 
 // Hard power-down between polls (NRSTPD low; battery/wake decisions
 // 2026-10-25).

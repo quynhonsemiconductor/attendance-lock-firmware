@@ -75,7 +75,7 @@ bool sync_decode_events_response(const char *body, size_t len, uint32_t *acked_t
 
 // Renders the POST /v1/door/terminal/events envelope
 // (fixture: events-request.json) for the given stream + batch.
-// battery_mv/low_battery are envelope-level (contract v1 + opshub#493) and
+// battery_mv/low_battery are envelope-level (door-terminal-v1 contract) and
 // carry the NEWEST event's snapshot — a live reading for the terminal list.
 // Omitted when the batch is empty (no snapshot to speak of). Returns bytes
 // written, or 0 when out is too small (nothing is half-written).

@@ -60,19 +60,15 @@ door_out_t door_fsm_apply(door_fsm_t *fsm, uint32_t now_ms, door_decision_t deci
         out.buzzer = true;
         return out;
     }
-    // Every deny keeps the door locked (a deny during an open window does
-    // NOT slam it — the earlier allow's window runs to its end).
+    // Every deny keeps the door where it is: locked stays locked, an open
+    // window keeps running to its end (a deny never slams the door).
+    // out.engage reflects the CURRENT state — it is false while released,
+    // so the caller does not re-drive the lock onto a moving servo.
     fsm->red_until_ms = now_ms + DENY_RED_MS;
     start_beeps(fsm, now_ms, 2);
-    out.engage = true;
-    if (!fsm->released) {
-        // The lock never moved: say so now; an already-released door keeps
-        // its own timeline (tick() re-engages when the window ends).
-        out.green = false;
-    } else {
-        out.release = true;
-        out.green = true;
-    }
+    out.engage = !fsm->released;
+    out.release = fsm->released;
+    out.green = fsm->released;
     out.red = true;
     out.buzzer = true;
     return out;

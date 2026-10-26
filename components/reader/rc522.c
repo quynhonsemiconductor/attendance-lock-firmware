@@ -195,7 +195,7 @@ bool rc522_init(const rc522_conf_t *conf)
     if (conf->rst_gpio >= 0) {
         gpio_set_level(conf->rst_gpio, 1);
     }
-    return rc522_wake_poll(conf, NULL, NULL);
+    return rc522_wake_poll(conf, NULL, NULL) != RC522_FAULT;
 }
 
 // The prototype's health check, run on every wake: a live chip re-reads
@@ -214,11 +214,11 @@ bool rc522_healthy(const rc522_conf_t *conf)
 // poll — antenna on, settle, REQIDL + anticoll + select + halt, antenna
 // off, power down again. 4-byte UIDs only: a cascade tag (0x88) in the CL1
 // UID means a 7/10-byte card — rejected until CL2 is implemented.
-bool rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len)
+rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len)
 {
     if (conf->rst_gpio < 0) {
         ESP_LOGE(TAG, "no RST pin: power-down wake impossible");
-        return false;
+        return RC522_FAULT;
     }
     gpio_set_level(conf->rst_gpio, 1);
     vTaskDelay(pdMS_TO_TICKS(50)); // crystal restart after power-down (datasheet §9.3.2.6, prototype uses 50 ms)
@@ -226,13 +226,13 @@ bool rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len)
     if (!rc522_healthy(conf)) {
         uint8_t v = read_reg(conf, REG_VERSION);
         ESP_LOGW(TAG, "reader cs=%d did not init (VersionReg 0x%02x)", conf->cs_gpio, v);
-        return false;
+        return RC522_FAULT;
     }
 
     antenna_on(conf);
     vTaskDelay(pdMS_TO_TICKS(10)); // field settle (ISO 14443 ≥ 5 ms; prototype 10 ms)
 
-    bool found = false;
+    rc522_poll_result_t result = RC522_NONE;
     uint8_t reqa = PICC_REQA;
     uint8_t atqa[2];
     write_reg(conf, REG_TX_MODE, 0x00); // CRC off for REQIDL + anticoll
@@ -267,10 +267,10 @@ bool rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len)
         memcpy(uid, reply, 4);
         *uid_len = 4;
     }
-    found = true;
+    result = RC522_CARD;
 out:
     antenna_off(conf);
-    return found;
+    return result;
 }
 
 void rc522_power_down(const rc522_conf_t *conf)

@@ -43,6 +43,7 @@ static void poll_loop(void *arg)
     for (;;) {
         uint32_t now = now_ms();
         for (int i = 0; i < 2; i++) {
+            bool was_probe = !s_online[i];
             bool poll = s_online[i];
             if (!poll && (uint32_t)(now - s_last_probe_ms[i]) >= OFFLINE_PROBE_MS) {
                 s_last_probe_ms[i] = now;
@@ -51,7 +52,11 @@ static void poll_loop(void *arg)
             if (poll) {
                 uint8_t uid[4];
                 uint8_t uid_len = sizeof(uid);
-                if (rc522_wake_poll(&s_conf[i], uid, &uid_len)) {
+                switch (rc522_wake_poll(&s_conf[i], uid, &uid_len)) {
+                case RC522_CARD:
+                    if (!s_online[i]) {
+                        s_online[i] = true;
+                    }
                     if (s_on_card != NULL) {
                         reader_card_t card = { .reader = (uint8_t)i, .uid_len = uid_len };
                         memcpy(card.uid, uid, uid_len);
@@ -61,14 +66,24 @@ static void poll_loop(void *arg)
                             s_on_card(&card);
                         }
                     }
-                } else if (s_online[i]) {
-                    s_online[i] = false;
-                    if (s_on_fault != NULL) {
-                        s_on_fault((uint8_t)i);
+                    break;
+                case RC522_NONE:
+                    // Empty field is a normal poll, never a fault. A probe
+                    // that gets this far passed the health check: recovered.
+                    if (was_probe) {
+                        s_online[i] = true;
+                        ESP_LOGI(TAG, "reader %d back online", i);
                     }
-                } else if (rc522_healthy(&s_conf[i])) {
-                    s_online[i] = true; // probe found it alive again
-                    ESP_LOGI(TAG, "reader %d back online", i);
+                    break;
+                case RC522_FAULT:
+                    if (s_online[i]) {
+                        s_online[i] = false;
+                        ESP_LOGW(TAG, "reader %d fault (health check) — probing", i);
+                        if (s_on_fault != NULL) {
+                            s_on_fault((uint8_t)i);
+                        }
+                    }
+                    break;
                 }
             }
             rc522_power_down(&s_conf[i]);

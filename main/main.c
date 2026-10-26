@@ -51,12 +51,32 @@ static uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+// Lock commands only on a state CHANGE: re-driving lock_engage every 50 ms
+// tick would restart the servo pulse forever (hum + battery drain) and the
+// release timer would never fire. First state after lock_init: engaged.
+static bool s_lock_engaged = true;
+static uint32_t s_servo_until_ms; // a move is running until this time
+
+static void drive_lock(bool engage)
+{
+    if (engage == s_lock_engaged) {
+        return;
+    }
+    if (engage) {
+        lock_engage();
+    } else {
+        lock_release();
+    }
+    s_lock_engaged = engage;
+    s_servo_until_ms = now_ms() + CONFIG_LOCK_SERVO_MOVE_MS;
+}
+
 static void apply_out(const door_out_t *out)
 {
     if (out->engage) {
-        lock_engage();
+        drive_lock(true);
     } else if (out->release) {
-        lock_release();
+        drive_lock(false);
     }
     gpio_set_level(CONFIG_DOOR_FEEDBACK_GPIO_GREEN, out->green ? 1 : 0);
     gpio_set_level(CONFIG_DOOR_FEEDBACK_GPIO_RED, out->red ? 1 : 0);
@@ -77,11 +97,21 @@ static bool battery_deny(uint32_t battery_mv)
            power_brownout_blocked(now_ms());
 }
 
+// Latest battery reading, refreshed between servo moves — a tap during a
+// move reuses it instead of sampling the sagging rail (false deny).
+static uint32_t s_last_battery_mv;
+static bool s_last_low_battery;
+static bool s_battery_valid;
+
 static void handle_tap(const door_msg_t *msg)
 {
-    // Sample the battery BEFORE any servo move — the surge would skew it.
-    uint32_t battery_mv = power_battery_mv();
-    bool low_battery = power_is_low(battery_mv, CONFIG_POWER_BATTERY_LOW_MV);
+    if (now_ms() >= s_servo_until_ms) {
+        // Sample only with the servo idle — the move surge skews the rail.
+        s_last_battery_mv = power_battery_mv();
+        s_last_low_battery = power_is_low(s_last_battery_mv, CONFIG_POWER_BATTERY_LOW_MV);
+        s_battery_valid = s_last_battery_mv != 0;
+    }
+    uint32_t battery_mv = s_battery_valid ? s_last_battery_mv : 0;
 
     uint64_t stamp = 0;
     bool synced = clock_synced();
@@ -94,22 +124,17 @@ static void handle_tap(const door_msg_t *msg)
         d = DOOR_DENY_BATTERY; // the surge would brown the rail out — stay locked
     }
     door_out_t out = door_fsm_apply(&s_fsm, now_ms(), d);
-    if (d == DOOR_ALLOW) {
-        // No light sleep while released or while a servo move runs (PR4b):
-        // the pm lock holds until the relock settles.
-        esp_pm_lock_acquire(s_nosleep);
-    }
     apply_out(&out);
     ESP_LOGI(TAG, "tap r=%u %s (%s) battery=%umV%s", msg->reader,
              d == DOOR_ALLOW ? "allow" : "deny", door_decision_name(d), battery_mv,
-             low_battery ? " low" : "");
+             s_last_low_battery && s_battery_valid ? " low" : "");
 
     sync_event_t ev = {
         .reader = msg->reader,
         .uid_len = msg->uid_len,
         .result = d == DOOR_ALLOW ? 0 : 1,
         .battery_mv = (uint16_t)(battery_mv > 0xFFFF ? 0xFFFF : battery_mv),
-        .low_battery = low_battery,
+        .low_battery = s_last_low_battery && s_battery_valid,
         .boot_id = clock_boot_id(),
         .uptime_us = msg->uptime_us,
     };
@@ -127,7 +152,7 @@ static void reload_allow_list(void)
     if (store_allow_list_read(s_cards[inactive], STORE_CARDS_MAX, &n, etag, sizeof(etag),
                               &etag_len) == STORE_OK) {
         s_n_cards[inactive] = n;
-        s_active = inactive; // the flip is one store — atomic to the reader
+        s_active = inactive; // one store — handle_tap (same task) sees the new list whole
     }
 }
 
@@ -155,6 +180,7 @@ static void door_task(void *arg)
     esp_task_wdt_add(NULL);
     uint32_t last_reload = 0;
     bool was_released = false;
+    bool pm_held = true; // held since app_main's boot engage (below)
     for (;;) {
         door_msg_t msg;
         if (xQueueReceive(s_taps, &msg, pdMS_TO_TICKS(50))) {
@@ -169,11 +195,21 @@ static void door_task(void *arg)
         }
         door_out_t out = door_fsm_tick(&s_fsm, now_ms());
         apply_out(&out);
-        // Hold the pm lock through the relock move, then let it sleep again.
-        if (was_released && !door_fsm_released(&s_fsm)) {
-            esp_pm_lock_release(s_nosleep);
+
+        // pm lock edges: acquire on locked->released, hold through the
+        // relock's servo move (drive_lock stamped s_servo_until_ms), never
+        // re-acquire on a re-tap that only extends the window.
+        bool released = door_fsm_released(&s_fsm);
+        if (!was_released && released && !pm_held) {
+            esp_pm_lock_acquire(s_nosleep);
+            pm_held = true;
         }
-        was_released = door_fsm_released(&s_fsm);
+        if (!released && pm_held && now_ms() >= s_servo_until_ms) {
+            esp_pm_lock_release(s_nosleep);
+            pm_held = false;
+        }
+        was_released = released;
+
         if ((uint32_t)(now_ms() - last_reload) > 60000) {
             reload_allow_list(); // picks up sync's replaced list within a minute
             last_reload = now_ms();
@@ -184,10 +220,28 @@ static void door_task(void *arg)
 
 void app_main(void)
 {
+    // Power management on: DFS + light sleep between the reader polls
+    // (the pm lock keeps the chip awake while the lock moves or is released).
+    esp_pm_config_t pm = {
+        .max_freq_mhz = 240,
+        .min_freq_mhz = 10,
+        .light_sleep_enable = true,
+    };
+    if (esp_pm_configure(&pm) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_pm_configure failed — running flat out");
+    }
+
     // Fail-secure order: the lock comes up FIRST, before anything that could
     // block or crash. A hung boot or a watchdog reset lands here again —
-    // locked (§2.8: boots locked).
+    // locked (§2.8: boots locked). The pm lock covers the boot move too;
+    // door_task releases it once the move has settled.
+    if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "door", &s_nosleep) != ESP_OK) {
+        ESP_LOGE(TAG, "pm lock create failed — no light sleep at all");
+    } else {
+        esp_pm_lock_acquire(s_nosleep);
+    }
     lock_init();
+    s_servo_until_ms = now_ms() + CONFIG_LOCK_SERVO_MOVE_MS;
 
     provision_init();
     bool store_ok = store_init();
@@ -206,9 +260,6 @@ void app_main(void)
 
     // The TWDT is initialised by sdkconfig (10 s, panic) — nothing to init
     // here; the reader and door tasks subscribe themselves.
-    if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "door", &s_nosleep) != ESP_OK) {
-        ESP_LOGE(TAG, "pm lock create failed — no light sleep at all");
-    }
 
     door_fsm_init(&s_fsm, CONFIG_DOOR_UNLOCK_HOLD_MS);
     s_taps = xQueueCreate(8, sizeof(door_msg_t));
