@@ -25,7 +25,7 @@ jobs:
       contents: read
       security-events: write
       packages: read
-    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
+    uses: quynhonsemiconductor/ci/.github/workflows/security.yml@de56bff40c5468623aa9e69d1ebe8e638e874bdf # v1.24.2
     with:
       product: attendance-lock
       scan_container: false # image CVEs are gated on push; the schedule is source scans only

@@ -12,6 +12,6 @@ permissions:
 
 jobs:
   release-please:
-    uses: quynhonsemiconductor/ci/.github/workflows/release-please.yml@dcdd8dc937aa9d199a4e75e0e187eb52ca520836 # v1.23.1
+    uses: quynhonsemiconductor/ci/.github/workflows/release-please.yml@de56bff40c5468623aa9e69d1ebe8e638e874bdf # v1.24.2
     secrets:
       QNSC_AUTOMATION_PRIVATE_KEY: ${{ secrets.QNSC_AUTOMATION_PRIVATE_KEY }}
