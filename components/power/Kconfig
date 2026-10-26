@@ -1,0 +1,38 @@
+menu "Power"
+
+config POWER_BATTERY_MONITOR
+    bool "Battery voltage monitor"
+    default y
+
+config POWER_BATTERY_ADC_CHANNEL
+    int "ADC1 channel for the divider tap (GPIO1 = channel 0)"
+    default 0
+
+config POWER_BATTERY_DIV_MUL
+    int "Divider multiplier (pack mV per ...)"
+    default 11
+
+config POWER_BATTERY_DIV_DIV
+    int "Divider denominator (pin mV × MUL / DIV = pack mV)"
+    default 1
+
+config POWER_BATTERY_LOW_MV
+    int "Low-battery threshold (pack mV)"
+    default 5000
+    help
+        Report-only alert at ~5.0 V; the regulator's effective cutoff is
+        ~4.8 V.
+
+config POWER_BATTERY_CUTOFF_MV
+    int "Effective cutoff (pack mV)"
+    default 4800
+    help
+        Below this the regulator drops out; releases are denied at
+        cutoff + margin so the servo surge cannot brown the rail out.
+
+config POWER_BATTERY_DENY_MARGIN_MV
+    int "Release-deny margin above the cutoff (pack mV)"
+    default 200
+    range 0 2000
+
+endmenu

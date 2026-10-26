@@ -21,7 +21,9 @@ void app_main(void)
     // them; on failure the door still works (locked) and sync re-syncs.
     store_init();
     clock_init();
-    reader_init();
+    // Drivers (PR4a): the poll task runs now; the door task (PR4b) wires
+    // the tap callback.
+    reader_start(NULL);
     sync_init();
 
     // Scaffold: nothing else runs yet. Firmware v1 (work item 7) adds the

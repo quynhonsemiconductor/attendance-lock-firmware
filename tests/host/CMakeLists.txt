@@ -67,3 +67,27 @@ add_test(NAME store_ring COMMAND host_tests_ring)
 add_test(NAME store_alist COMMAND host_tests_alist)
 add_test(NAME clock COMMAND host_tests_clock)
 add_test(NAME sync COMMAND host_tests_sync)
+add_test(NAME reader COMMAND host_tests_reader)
+add_test(NAME lock COMMAND host_tests_lock)
+add_test(NAME power COMMAND host_tests_power)
+
+# reader: host-safe tap logic
+add_executable(host_tests_reader
+  test_reader_logic.c
+  ../../components/reader/reader_logic.c)
+target_include_directories(host_tests_reader PRIVATE ../../components/reader/include)
+target_link_libraries(host_tests_reader PRIVATE unity)
+
+# lock: host-safe servo math
+add_executable(host_tests_lock
+  test_lock.c
+  ../../components/lock/lock_math.c)
+target_include_directories(host_tests_lock PRIVATE ../../components/lock/include)
+target_link_libraries(host_tests_lock PRIVATE unity)
+
+# power: host-safe battery math
+add_executable(host_tests_power
+  test_power.c
+  ../../components/power/power.c)
+target_include_directories(host_tests_power PRIVATE ../../components/power/include)
+target_link_libraries(host_tests_power PRIVATE unity)
