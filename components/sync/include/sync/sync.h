@@ -26,6 +26,8 @@ typedef struct __attribute__((packed)) {
     uint8_t result;       // 0 = allow, 1 = deny
     uint32_t boot_id;     // power segment the event belongs to (LE)
     uint64_t uptime_us;   // capture time (LE) — device_ts derived at upload
+    uint16_t battery_mv;  // pack voltage at enqueue (0 = unknown; LE)
+    uint8_t low_battery;  // 1 when battery_mv was under the alert threshold
 } sync_event_t;
 
 // Starts the sync task (device build): one bounded session per interval.
@@ -72,8 +74,11 @@ bool sync_decode_events_response(const char *body, size_t len, uint32_t *acked_t
                                  size_t *rejected_len);
 
 // Renders the POST /v1/door/terminal/events envelope
-// (fixture: events-request.json) for the given stream + batch. Returns
-// bytes written, or 0 when out is too small (nothing is half-written).
+// (fixture: events-request.json) for the given stream + batch.
+// battery_mv/low_battery are envelope-level (contract v1 + opshub#493) and
+// carry the NEWEST event's snapshot — a live reading for the terminal list.
+// Omitted when the batch is empty (no snapshot to speak of). Returns bytes
+// written, or 0 when out is too small (nothing is half-written).
 size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
                             const store_event_t *events, size_t n_events, char *out, size_t cap);
 
