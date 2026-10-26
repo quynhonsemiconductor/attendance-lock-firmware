@@ -20,6 +20,19 @@ config POWER_BATTERY_LOW_MV
     int "Low-battery threshold (pack mV)"
     default 5000
     help
-        Alert at ~5.0 V; the regulator's effective cutoff is ~4.8 V.
+        Report-only alert at ~5.0 V; the regulator's effective cutoff is
+        ~4.8 V.
+
+config POWER_BATTERY_CUTOFF_MV
+    int "Effective cutoff (pack mV)"
+    default 4800
+    help
+        Below this the regulator drops out; releases are denied at
+        cutoff + margin so the servo surge cannot brown the rail out.
+
+config POWER_BATTERY_DENY_MARGIN_MV
+    int "Release-deny margin above the cutoff (pack mV)"
+    default 200
+    range 0 2000
 
 endmenu
