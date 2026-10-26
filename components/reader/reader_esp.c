@@ -1,8 +1,10 @@
-// The poll task: wake → REQA/anticoll → callback → hard power-down, with a
-// light sleep between polls (battery/wake decisions 2026-10-25). Tap
-// acceptance (debounce + cross-read) runs through the host-tested logic.
-// A reader that fails its health check is probed every ~5 s (prototype's
-// recovery cadence) instead of every poll.
+// The poll task: wake → REQA/anticoll → post to the door queue → hard
+// power-down. It owns NOTHING the door task touches — taps and faults both
+// travel the queue. Between polls it just delays: tickless idle (sdkconfig
+// PM) light-sleeps the chip, and the door task's pm lock keeps it awake
+// while the lock is released. Tap acceptance (debounce + cross-read) runs
+// through the host-tested logic. A reader that fails its health check is
+// probed every ~5 s (prototype's recovery cadence) instead of every poll.
 #include "reader/rc522.h"
 #include "reader/reader.h"
 
@@ -10,7 +12,7 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "esp_sleep.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,6 +24,7 @@
 static const char *TAG = "reader";
 
 static void (*s_on_card)(const reader_card_t *card);
+static void (*s_on_fault)(uint8_t reader);
 static rc522_conf_t s_conf[2];
 static bool s_online[2];
 static uint32_t s_last_probe_ms[2];
@@ -35,43 +38,51 @@ static uint32_t now_ms(void)
 static void poll_loop(void *arg)
 {
     (void)arg;
+    esp_task_wdt_add(NULL);
     memset(s_tap_state, 0, reader_state_size());
     for (;;) {
         uint32_t now = now_ms();
         for (int i = 0; i < 2; i++) {
-            bool polled = true;
-            if (!s_online[i]) {
-                if ((uint32_t)(now - s_last_probe_ms[i]) < OFFLINE_PROBE_MS) {
-                    polled = false; // dead reader: probe on the 5 s cadence
-                } else {
-                    s_last_probe_ms[i] = now;
-                }
+            bool poll = s_online[i];
+            if (!poll && (uint32_t)(now - s_last_probe_ms[i]) >= OFFLINE_PROBE_MS) {
+                s_last_probe_ms[i] = now;
+                poll = true; // dead reader: probe on the 5 s cadence
             }
-            if (polled) {
+            if (poll) {
                 uint8_t uid[4];
                 uint8_t uid_len = sizeof(uid);
-                if (rc522_wake_poll(&s_conf[i], uid, &uid_len) && s_on_card != NULL) {
-                    reader_card_t card = { .reader = (uint8_t)i, .uid_len = uid_len };
-                    memcpy(card.uid, uid, uid_len);
-                    if (reader_accept(s_tap_state, reader_state_size(), &card, now,
-                                      CONFIG_READER_DEBOUNCE_MS,
-                                      CONFIG_READER_CROSS_READ_MS)) {
-                        s_on_card(&card);
+                if (rc522_wake_poll(&s_conf[i], uid, &uid_len)) {
+                    if (s_on_card != NULL) {
+                        reader_card_t card = { .reader = (uint8_t)i, .uid_len = uid_len };
+                        memcpy(card.uid, uid, uid_len);
+                        if (reader_accept(s_tap_state, reader_state_size(), &card, now,
+                                          CONFIG_READER_DEBOUNCE_MS,
+                                          CONFIG_READER_CROSS_READ_MS)) {
+                            s_on_card(&card);
+                        }
                     }
+                } else if (s_online[i]) {
+                    s_online[i] = false;
+                    if (s_on_fault != NULL) {
+                        s_on_fault((uint8_t)i);
+                    }
+                } else if (rc522_healthy(&s_conf[i])) {
+                    s_online[i] = true; // probe found it alive again
+                    ESP_LOGI(TAG, "reader %d back online", i);
                 }
             }
             rc522_power_down(&s_conf[i]);
         }
-        // Light sleep between polls: the poll timer wakes us. Uptime
-        // continues across light sleep, so event stamps stay valid.
-        esp_sleep_enable_timer_wakeup((uint64_t)CONFIG_READER_POLL_MS * 1000);
-        esp_light_sleep_start();
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_READER_POLL_MS));
     }
 }
 
-void reader_start(void (*on_card)(const reader_card_t *card))
+void reader_start(void (*on_card)(const reader_card_t *card),
+                  void (*on_fault)(uint8_t reader))
 {
     s_on_card = on_card;
+    s_on_fault = on_fault;
     s_tap_state = calloc(1, reader_state_size());
     if (s_tap_state == NULL) {
         ESP_LOGE(TAG, "tap state alloc failed — no card reads");

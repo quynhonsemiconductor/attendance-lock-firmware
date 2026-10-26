@@ -1,8 +1,9 @@
 #pragma once
 // Two RC522 readers on one SPI bus (outside = IN, inside = OUT), polled —
 // the RC522 sits in hard power-down (RST low) between polls (battery/wake
-// decisions 2026-10-25). The wake strategy is behind Kconfig so a button or
-// an LPCD reader can be swapped in without a rewrite.
+// decisions 2026-10-25: tap-only, ~400 ms poll cadence). Between polls the
+// task delays; tickless idle light-sleeps the chip unless the door task
+// holds its pm lock (lock released / servo moving).
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -22,9 +23,11 @@ typedef struct {
 // Bytes of scratch state reader_accept() needs (zero before first use).
 size_t reader_state_size(void);
 
-// Starts the poll task. on_card runs in the reader task's context — it must
-// not block (it pushes to the ring and drives the lock, both non-blocking).
-void reader_start(void (*on_card)(const reader_card_t *card));
+// Starts the poll task. Both callbacks run in the reader task's context —
+// they must only post (the door task's queue), never block or touch the
+// door state. on_fault fires when a reader that was healthy stops answering.
+void reader_start(void (*on_card)(const reader_card_t *card),
+                  void (*on_fault)(uint8_t reader));
 
 // Should this tap be processed? Host-testable tap logic: the same card on
 // the same reader within debounce_ms is a still-held card (one event per

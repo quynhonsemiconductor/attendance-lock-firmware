@@ -70,6 +70,7 @@ add_test(NAME sync COMMAND host_tests_sync)
 add_test(NAME reader COMMAND host_tests_reader)
 add_test(NAME lock COMMAND host_tests_lock)
 add_test(NAME power COMMAND host_tests_power)
+add_test(NAME door COMMAND host_tests_door)
 
 # reader: host-safe tap logic
 add_executable(host_tests_reader
@@ -84,6 +85,16 @@ add_executable(host_tests_lock
   ../../components/lock/lock_math.c)
 target_include_directories(host_tests_lock PRIVATE ../../components/lock/include)
 target_link_libraries(host_tests_lock PRIVATE unity)
+
+# door_fsm: the door state machine + decision
+add_executable(host_tests_door
+  test_door_fsm.c
+  ../../components/door_fsm/door_fsm.c
+  ${STORE_SOURCES})
+target_include_directories(host_tests_door PRIVATE
+  ../../components/door_fsm/include
+  ../../components/store/include)
+target_link_libraries(host_tests_door PRIVATE unity)
 
 # power: host-safe battery math
 add_executable(host_tests_power

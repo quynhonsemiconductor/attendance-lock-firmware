@@ -15,6 +15,12 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x10000
 
+# Power management (battery/wake decisions 2026-10-25): tickless idle
+# light-sleeps between the ~400 ms reader polls. The door task holds a
+# NO_LIGHT_SLEEP pm lock while the lock is released or a servo move runs.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+
 # Fail-secure watchdog (§2.8: a hung firmware resets into "locked")
 CONFIG_ESP_TASK_WDT_INIT=y
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
