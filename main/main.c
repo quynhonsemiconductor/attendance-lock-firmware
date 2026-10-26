@@ -103,13 +103,19 @@ static uint32_t s_last_battery_mv;
 static bool s_last_low_battery;
 static bool s_battery_valid;
 
+// Refresh the cached reading. Servo must be IDLE here: the move surge sags
+// the rail and would read a false low (false deny).
+static void sample_battery(void)
+{
+    s_last_battery_mv = power_battery_mv();
+    s_last_low_battery = power_is_low(s_last_battery_mv, CONFIG_POWER_BATTERY_LOW_MV);
+    s_battery_valid = s_last_battery_mv != 0;
+}
+
 static void handle_tap(const door_msg_t *msg)
 {
     if (now_ms() >= s_servo_until_ms) {
-        // Sample only with the servo idle — the move surge skews the rail.
-        s_last_battery_mv = power_battery_mv();
-        s_last_low_battery = power_is_low(s_last_battery_mv, CONFIG_POWER_BATTERY_LOW_MV);
-        s_battery_valid = s_last_battery_mv != 0;
+        sample_battery();
     }
     uint32_t battery_mv = s_battery_valid ? s_last_battery_mv : 0;
 
@@ -231,6 +237,13 @@ void app_main(void)
         ESP_LOGE(TAG, "esp_pm_configure failed — running flat out");
     }
 
+    // Prime the battery cache while the rail is still quiet: the boot engage
+    // move below sags it, and a tap during that window reuses the cache —
+    // without a sample here it is invalid (0 mV) and the low-battery deny
+    // would be skipped. power_init is ADC setup only (fast, non-blocking).
+    power_init();
+    sample_battery();
+
     // Fail-secure order: the lock comes up FIRST, before anything that could
     // block or crash. A hung boot or a watchdog reset lands here again —
     // locked (§2.8: boots locked). The pm lock covers the boot move too;
@@ -246,7 +259,6 @@ void app_main(void)
     provision_init();
     bool store_ok = store_init();
     clock_init();
-    power_init();
     sync_init();
 
     gpio_config_t out = {

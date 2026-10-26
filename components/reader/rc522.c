@@ -43,6 +43,7 @@
 #define IRQ_RX 0x20
 #define IRQ_TIMER 0x01
 #define ERR_FRAME 0x13 // BufferOfl|ParityErr|ProtocolErr — bad frame, retry next poll
+#define ERR_CRC 0x04   // CRCErr — bad CRC on a CRC-on exchange (select), retry next poll
 
 #define PICC_REQA 0x26
 #define PICC_ANTICOLL_CL1 0x93
@@ -139,6 +140,11 @@ static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
         if (read_reg(conf, REG_ERROR) & ERR_FRAME) {
             return 0;
         }
+    }
+    // CRCErr latches only on CRC-on exchanges (select/halt): a reply with a
+    // bad CRC must not reach the caller as a valid frame.
+    if (read_reg(conf, REG_ERROR) & ERR_CRC) {
+        return 0;
     }
     uint8_t n = read_reg(conf, REG_FIFO_LEVEL);
     if (n > rx_cap) {
