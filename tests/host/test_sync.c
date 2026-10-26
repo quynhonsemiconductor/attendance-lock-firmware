@@ -71,6 +71,8 @@ static sync_event_t fixture_event(void)
     ev.uid[1] = 0xA1;
     ev.uid[2] = 0xB2;
     ev.uid[3] = 0xC3;
+    ev.battery_mv = 5400; // the fixture's envelope-level battery snapshot
+    ev.low_battery = 0;
     ev.result = 0; // "allow"
     return ev;
 }
@@ -487,8 +489,8 @@ void test_session_uses_date_header_when_unsynced(void)
 
 void test_next_delay_interval_when_clean(void)
 {
-    TEST_ASSERT_EQUAL_UINT32(30u * 60 * 1000, sync_next_delay_ms(true, 0));
-    TEST_ASSERT_EQUAL_UINT32(30u * 60 * 1000, sync_next_delay_ms(true, 5));
+    TEST_ASSERT_EQUAL_UINT32(60u * 60 * 1000, sync_next_delay_ms(true, 0));
+    TEST_ASSERT_EQUAL_UINT32(60u * 60 * 1000, sync_next_delay_ms(true, 5));
 }
 
 void test_next_delay_backoff_grows_and_caps(void)

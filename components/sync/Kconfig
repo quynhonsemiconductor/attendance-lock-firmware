@@ -2,7 +2,7 @@ menu "Sync"
 
 config SYNC_INTERVAL_MIN
     int "Minutes between sync sessions"
-    default 30
+    default 60
     range 1 1440
     help
         The bounded session (Wi-Fi up, SNTP, allow-list poll, event upload,

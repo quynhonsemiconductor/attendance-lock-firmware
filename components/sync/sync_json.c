@@ -149,6 +149,13 @@ size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
     }
     emit_str(&e, "\",\"dropped\":");
     emit_u32(&e, dropped);
+    if (n_events > 0) {
+        const sync_event_t *last = (const sync_event_t *)events[n_events - 1].bytes;
+        emit_str(&e, ",\"battery_mv\":");
+        emit_u32(&e, last->battery_mv);
+        emit_str(&e, ",\"low_battery\":");
+        emit_str(&e, last->low_battery ? "true" : "false");
+    }
     emit_str(&e, ",\"events\":[");
     for (size_t i = 0; i < n_events; i++) {
         if (i > 0) {

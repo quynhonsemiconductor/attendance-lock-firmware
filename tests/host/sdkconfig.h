@@ -3,4 +3,4 @@
 // sdkconfig asserts cover the device side.
 #pragma once
 
-#define CONFIG_SYNC_INTERVAL_MIN 30
+#define CONFIG_SYNC_INTERVAL_MIN 60

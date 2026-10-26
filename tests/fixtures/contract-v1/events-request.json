@@ -1,6 +1,8 @@
 {
   "stream": "6f1a2b3c-0000-4000-8000-000000000001",
   "dropped": 0,
+  "battery_mv": 5400,
+  "low_battery": false,
   "events": [
     {
       "seq": 1234,
