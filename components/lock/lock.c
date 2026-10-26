@@ -23,9 +23,9 @@ void lock_engage(void)
 {
 #if CONFIG_LOCK_BACKEND_SERVO
     lock_esp_servo_write(clamp_pulse(CONFIG_LOCK_SERVO_LOCK_US));
-    if (CONFIG_LOCK_SERVO_RELEASE) {
-        lock_esp_servo_release_after(CONFIG_LOCK_SERVO_MOVE_MS);
-    }
+#if CONFIG_LOCK_SERVO_RELEASE
+    lock_esp_servo_release_after(CONFIG_LOCK_SERVO_MOVE_MS);
+#endif
 #elif CONFIG_LOCK_BACKEND_RELAY
     lock_esp_relay_write(0);
 #else
@@ -37,9 +37,9 @@ void lock_release(void)
 {
 #if CONFIG_LOCK_BACKEND_SERVO
     lock_esp_servo_write(clamp_pulse(CONFIG_LOCK_SERVO_UNLOCK_US));
-    if (CONFIG_LOCK_SERVO_RELEASE) {
-        lock_esp_servo_release_after(CONFIG_LOCK_SERVO_MOVE_MS);
-    }
+#if CONFIG_LOCK_SERVO_RELEASE
+    lock_esp_servo_release_after(CONFIG_LOCK_SERVO_MOVE_MS);
+#endif
 #elif CONFIG_LOCK_BACKEND_RELAY
     lock_esp_relay_write(1);
 #else

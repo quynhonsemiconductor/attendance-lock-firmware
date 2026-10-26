@@ -61,6 +61,10 @@ void lock_esp_init(void)
         s_release_timer = NULL;
     }
 #else
+    // The output register is set to the ENGAGED level BEFORE the pin turns
+    // into an output: an active-low relay would otherwise see the default
+    // low level as a command glitch at boot. Boot = engaged is §2.8 anyway.
+    gpio_set_level(CONFIG_LOCK_RELAY_GPIO, CONFIG_LOCK_RELAY_ACTIVE ? 1 : 0);
     gpio_config_t io = {
         .pin_bit_mask = 1ULL << CONFIG_LOCK_RELAY_GPIO,
         .mode = GPIO_MODE_OUTPUT,

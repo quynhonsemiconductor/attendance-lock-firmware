@@ -12,6 +12,7 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -41,8 +42,7 @@
 
 #define IRQ_RX 0x20
 #define IRQ_TIMER 0x01
-#define ERR_WR 0x08 // WR_ERR (buffer overflow) — SPI framed while FIFO busy
-#define ERR_CR 0x40 // CRC or collision framing problem — retry next poll
+#define ERR_FRAME 0x13 // BufferOfl|ParityErr|ProtocolErr — bad frame, retry next poll
 
 #define PICC_REQA 0x26
 #define PICC_ANTICOLL_CL1 0x93
@@ -84,7 +84,7 @@ static void write_fifo(const rc522_conf_t *conf, const uint8_t *data, size_t len
 
 // The prototype's init recipe (its PCD_Init): soft reset, then the timer /
 // ASK / mode registers that make REQA work. TPrescaler 0xA9 + TMode 0x80 +
-// TReload 30 gives the ~25 ms transceive timeout the timer IRQ reports.
+// TReload 0x03E8 gives the 25 ms transceive timeout the timer IRQ reports.
 static void chip_init(const rc522_conf_t *conf)
 {
     write_reg(conf, REG_COMMAND, CMD_SOFT_RESET);
@@ -93,8 +93,8 @@ static void chip_init(const rc522_conf_t *conf)
     }
     write_reg(conf, REG_T_MODE, 0x80);
     write_reg(conf, REG_T_PRESCALER, 0xA9);
-    write_reg(conf, REG_T_RELOAD_LSB, 30);
-    write_reg(conf, REG_T_RELOAD_MSB, 0x00);
+    write_reg(conf, REG_T_RELOAD_LSB, 0xE8); // 0x03E8 ticks of 25 µs = 25 ms
+    write_reg(conf, REG_T_RELOAD_MSB, 0x03);
     write_reg(conf, REG_TX_ASK, 0x40);
     write_reg(conf, REG_MODE, 0x3D);
     write_reg(conf, REG_RF_CFG,
@@ -112,7 +112,9 @@ static void antenna_off(const rc522_conf_t *conf)
     write_reg(conf, REG_TX_CONTROL, (uint8_t)(read_reg(conf, REG_TX_CONTROL) & ~0x03));
 }
 
-// Transceive with the timer guarding "no card answered". CRC off; callers
+// Transceive with the timer guarding "no card answered" (25 ms) and a
+// ~36 ms software bound behind it in case the IRQ flags never arrive.
+// CRC off; callers
 // needing CRC set TxMode/RxMode first. Returns reply length or 0 on
 // timeout/overrun (both are "no card this poll", not a reader fault).
 static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_len,
@@ -125,7 +127,8 @@ static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
     write_reg(conf, REG_COMMAND, CMD_TRANSCEIVE); // then StartSend below
     write_reg(conf, REG_COMMAND, (uint8_t)(CMD_TRANSCEIVE | 0x80));
 
-    for (;;) {
+    int64_t deadline_us = esp_timer_get_time() + 36000;
+    while (esp_timer_get_time() < deadline_us) {
         uint8_t irq = read_reg(conf, REG_COM_IRQ);
         if (irq & IRQ_RX) {
             break;
@@ -133,8 +136,7 @@ static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
         if (irq & IRQ_TIMER) {
             return 0;
         }
-        uint8_t err = read_reg(conf, REG_ERROR);
-        if (err & (ERR_WR | ERR_CR)) {
+        if (read_reg(conf, REG_ERROR) & ERR_FRAME) {
             return 0;
         }
     }
@@ -251,7 +253,7 @@ bool rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len)
         }
         goto out;
     }
-    uint8_t select[9] = { PICC_SELECT_CL1, 0x70, reply[0], reply[1], reply[2], reply[3], bcc };
+    uint8_t select[7] = { PICC_SELECT_CL1, 0x70, reply[0], reply[1], reply[2], reply[3], bcc };
     uint8_t sak[3];
     write_reg(conf, REG_TX_MODE, 0x80); // CRC on for select + halt
     write_reg(conf, REG_RX_MODE, 0x80);
