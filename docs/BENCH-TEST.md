@@ -3,7 +3,8 @@
 > **Tóm tắt (VN):** Tài liệu này dành cho Vinh để chạy thử thiết bị trên bàn
 > (bench): danh sách linh kiện, cách nối dây theo chân Kconfig mặc định, cách
 > build/nạp firmware (ESP-IDF v6.0.3, profile `dev`), và bảng kiểm tra từng
-> bước (đọc thẻ 4 byte, từ chối thẻ lạ, mở/khoá cửa, pin yếu, mất nguồn,
+> bước (đọc thẻ 4 byte, từ chối thẻ lạ, mở/khoá cửa, pin yếu — dưới 5.0 V
+> thì báo động và từ chối mở cửa, mất nguồn,
 > ngắt đầu đọc, đồng bộ Wi-Fi). Ghi kết quả vào cột **Pass?**, chụp ảnh bảng
 > đã điền, lưu log bằng `idf.py monitor` rồi gửi lại kèm số dòng điện đo
 > được và SHA firmware.
@@ -53,6 +54,7 @@ Match the CI-pinned toolchain: **ESP-IDF v6.0.3**. Any v6.0.x is fine on the
 bench; do not use v6.1 (beta).
 
 ```sh
+. $IDF_PATH/export.sh
 idf.py set-target esp32s3
 idf.py -B build-dev -DSDKCONFIG="build-dev/sdkconfig" \
        -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.dev" build
@@ -81,7 +83,7 @@ python $IDF_PATH/components/nvs_flash/nvs_partition_generator/nvs_partition_gen.
 parttool.py write_partition --partition-name nvs --input prov.bin
 ```
 
-Or skip rows 14–15 until the provisioning console lands.
+Or skip row 14 until the provisioning console lands. (Row 15 is read distance and does not need provisioning.)
 
 ## 5. Bench checklist
 
@@ -97,8 +99,8 @@ servo move 700 ms, poll 400 ms.
 | 5 | 7-byte UID card | Tap the 7-byte-UID card | Skipped silently: log `7/10-byte UID (cascade) not supported — card skipped`, no feedback, no unlock. This is the current design (CL2 not implemented) | |
 | 6 | Servo released after move | Listen/feel + current meter during unlock | Signal stops after the 700 ms move (Kconfig `LOCK_SERVO_RELEASE`): no hum, no holding current | |
 | 7 | Sleep current | USB meter between taps, lock idle, no sync session | Light sleep between the 400 ms polls; record mA (and µA if the meter resolves it) | |
-| 8 | Low-battery alert | Sweep PSU 5.2 → 4.9 V slowly | At < 5.0 V: log `battery low`, event `low_battery=1`; door still works (alert is report-only) | |
-| 9 | Release deny below cutoff+margin | At 4.99–4.8 V tap an allow-listed card | DENY: red 2 s + double beep, stays locked, log `tap r=0 deny (low-battery) … battery=…mV` (deny gate = 4800 + 200 mV) | |
+| 8 | Low-battery alert + release gate | Sweep PSU 5.2 → 5.0 → 4.9 V slowly; at 5.0 V and at 4.9 V tap an allow-listed card | At >= 5.0 V: tap unlocks normally (green + single beep). At < 5.0 V: log `battery low`, event `low_battery=1`, and the tap is DENIED (see row 9). Threshold is 5000 mV for both the alert and the release gate | |
+| 9 | Release deny below 5.0 V | At 4.99 V and at 4.8 V tap an allow-listed card | DENY: red 2 s + double beep, stays locked, log `tap r=0 deny (low-battery) … battery=…mV`. Deny gate = cutoff 4800 + margin 200 = 5000 mV, same as the row 8 alert | |
 | 10 | Boot-window deny | Set PSU to 4.9 V, power-cycle, tap during the first ~0.7 s (while the boot servo move runs) | DENY, not allow: the battery cache is primed before the boot move (this PR) | |
 | 11 | Power cut mid-unlock | Cut PSU while the lock is released, restore | Boots LOCKED (step 1 behaviour). Optional: confirm the buffered tap events survive (event ring) | |
 | 12 | Brownout backoff | Briefly dip the PSU so the board browns out ×2, then tap | Log `brownout resets: N, release blocked …ms after boot`; releases denied during the backoff window (doubling), taps still log | |
