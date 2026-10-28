@@ -32,6 +32,13 @@ typedef struct {
 static ent_t ents[HOST_MAX_ENTRIES];
 static int nents;
 
+// Namespace emulation: real NVS has no "store" namespace until the first
+// READWRITE open creates it, so a getter on a blank chip hits
+// nvs_open(READONLY) = ESP_ERR_NVS_NOT_FOUND. The gate below routes that
+// through the SAME mapping the ESP port uses (store_port_map.c), so the
+// host tests cover the device's mapping, not a lookalike.
+static bool ns_created;
+
 size_t store_port_flash_size(void)
 {
     return HOST_FLASH_SIZE;
@@ -155,6 +162,7 @@ bool store_port_nvs_set_blob(const char *key, const void *v, size_t len)
     if (strlen(key) >= HOST_KEY_MAX) {
         return false;
     }
+    ns_created = true; // nvs_open(READWRITE) creates the namespace
     ent_t *e = find(key);
     if (e == NULL) {
         if (nents >= HOST_MAX_ENTRIES) {
@@ -176,6 +184,11 @@ bool store_port_nvs_set_blob(const char *key, const void *v, size_t len)
 
 store_port_nvs_res_t store_port_nvs_get_blob(const char *key, void *out, size_t *len)
 {
+    if (!ns_created) {
+        // The simulated nvs_open(READONLY) fails NOT_FOUND, exactly like a
+        // blank chip; store_port_map.c turns it into ABSENT.
+        return store_port_open_res(STORE_PORT_ESP_ERR_NVS_NOT_FOUND);
+    }
     ent_t *e = find(key);
     if (e == NULL) {
         return STORE_PORT_ABSENT;
@@ -232,6 +245,7 @@ void store_host_nvs_wipe(void)
         ents[i] = (ent_t){0};
     }
     nents = 0;
+    ns_created = false; // the erased partition has no namespace either
 }
 
 uint8_t *store_host_flash(void)

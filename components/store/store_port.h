@@ -46,6 +46,16 @@ bool store_port_nvs_set_blob(const char *key, const void *v, size_t len);
 store_port_nvs_res_t store_port_nvs_get_blob(const char *key, void *out, size_t *len);
 bool store_port_nvs_erase_key(const char *key);
 
+// esp_err_t codes the ports map (values from esp_err.h / nvs.h, duplicated
+// here because the host build has no IDF headers; store_port_esp.c
+// static-asserts they match). The pure mapping in store_port_map.c is
+// compiled into BOTH ports, so its behavior is under host test.
+#define STORE_PORT_ESP_OK 0
+#define STORE_PORT_ESP_ERR_NVS_NOT_FOUND 0x1102
+
+// nvs_open(READONLY) → tri-state: FOUND / ABSENT (namespace absent) / ERROR.
+store_port_nvs_res_t store_port_open_res(int esp_err);
+
 // Cryptographically random bytes (stream UUID generation). The ESP port
 // wraps esp_fill_random with bootloader_random_enable/disable so the RNG has
 // entropy before Wi-Fi is up.

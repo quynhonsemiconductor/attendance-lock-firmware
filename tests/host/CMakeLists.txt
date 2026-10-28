@@ -15,6 +15,7 @@ FetchContent_MakeAvailable(unity)
 # linked in place of store_port_esp.c.
 set(STORE_SOURCES
   ../../components/store/store.c
+  ../../components/store/store_port_map.c
   ../../components/store/store_port_host.c)
 include_directories(../../components/store) # store_port.h / store_port_host.h
 

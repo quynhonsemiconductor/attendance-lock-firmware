@@ -17,6 +17,11 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 
+// The duplicated esp_err_t values in store_port.h must match the IDF ones
+// (the host build has no headers to compare against).
+_Static_assert(ESP_ERR_NVS_NOT_FOUND == STORE_PORT_ESP_ERR_NVS_NOT_FOUND,
+               "store_port.h esp_err_t constants drifted from nvs.h");
+
 static const char *TAG = "store";
 
 #define NS "store"
@@ -56,19 +61,23 @@ void store_port_unlock(void)
 static bool nvs_ready(void)
 {
     static bool done;
+    static int logged_err; // 0 = nothing logged yet; no error is 0
     if (done) {
         return true;
     }
     esp_err_t e = nvs_flash_init();
-    if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // NEVER wipe here: the allow-list cache and the stream UUID live in
-        // this partition, and wiping would change the stream identity. Only
-        // an explicit, logged maintenance action may erase NVS.
-        ESP_LOGE(TAG, "nvs unusable (err=%d) — refusing to wipe", (int)e);
-        return false;
+    if (e == ESP_OK) {
+        done = true;
+        return true;
     }
-    done = (e == ESP_OK);
-    return done;
+    // NEVER wipe: the allow-list cache and the stream UUID live in this
+    // partition, and wiping would change the stream identity. Only an
+    // explicit, logged maintenance action may erase NVS.
+    if (e != logged_err) { // every access retries: log per CODE, not per call
+        ESP_LOGE(TAG, "nvs unusable (%s) — refusing to wipe", esp_err_to_name(e));
+        logged_err = e;
+    }
+    return false;
 }
 
 size_t store_port_flash_size(void)
@@ -118,14 +127,28 @@ bool store_port_nvs_set_u32(const char *key, uint32_t v)
     return ok;
 }
 
-store_port_nvs_res_t store_port_nvs_get_u32(const char *key, uint32_t *v)
+// Read-only open shared by the getters. A blank chip has never written the
+// "store" namespace, so nvs_open(READONLY) fails ESP_ERR_NVS_NOT_FOUND —
+// that is "every key absent", not a backend failure (a fresh device must
+// still boot and create the namespace on the first write, §2.8).
+static store_port_nvs_res_t open_ro(nvs_handle_t *h)
 {
     if (!nvs_ready()) {
         return STORE_PORT_ERROR;
     }
+    esp_err_t e = nvs_open(NS, NVS_READONLY, h);
+    if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "nvs_open(%s, ro) failed: %s", NS, esp_err_to_name(e));
+    }
+    return store_port_open_res(e); // shared mapping (also host-tested)
+}
+
+store_port_nvs_res_t store_port_nvs_get_u32(const char *key, uint32_t *v)
+{
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
-        return STORE_PORT_ERROR;
+    store_port_nvs_res_t r = open_ro(&h);
+    if (r != STORE_PORT_FOUND) {
+        return r;
     }
     esp_err_t e = nvs_get_u32(h, key, v);
     nvs_close(h);
@@ -154,12 +177,10 @@ bool store_port_nvs_set_blob(const char *key, const void *v, size_t len)
 
 store_port_nvs_res_t store_port_nvs_get_blob(const char *key, void *out, size_t *len)
 {
-    if (!nvs_ready()) {
-        return STORE_PORT_ERROR;
-    }
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
-        return STORE_PORT_ERROR;
+    store_port_nvs_res_t r = open_ro(&h);
+    if (r != STORE_PORT_FOUND) {
+        return r;
     }
     esp_err_t e = nvs_get_blob(h, key, out, len);
     nvs_close(h);
