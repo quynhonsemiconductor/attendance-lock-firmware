@@ -62,6 +62,15 @@ target_compile_definitions(host_tests_sync PRIVATE
   SYNC_HOST_BUILD)
 target_link_libraries(host_tests_sync PRIVATE unity)
 
+# provision: the console command parser + the RAM port double
+add_executable(host_tests_provision
+  test_provision.c
+  ../../components/provision/provision.c
+  ../../components/provision/provision_port_host.c)
+include_directories(../../components/provision) # provision_port.h / host header
+target_include_directories(host_tests_provision PRIVATE ../../components/provision/include)
+target_link_libraries(host_tests_provision PRIVATE unity)
+
 enable_testing()
 add_test(NAME store_ring COMMAND host_tests_ring)
 add_test(NAME store_alist COMMAND host_tests_alist)
@@ -70,6 +79,7 @@ add_test(NAME sync COMMAND host_tests_sync)
 add_test(NAME reader COMMAND host_tests_reader)
 add_test(NAME lock COMMAND host_tests_lock)
 add_test(NAME power COMMAND host_tests_power)
+add_test(NAME provision COMMAND host_tests_provision)
 add_test(NAME door COMMAND host_tests_door)
 
 # reader: host-safe tap logic

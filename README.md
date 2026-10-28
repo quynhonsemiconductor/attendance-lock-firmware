@@ -15,6 +15,8 @@ ESP-IDF v6.0.x rewrite, **not** a port of the Arduino prototype.
 | `main/` | app entry; boots locked, fail-secure order |
 | `components/reader` | card readers (in/out lanes) |
 | `components/lock` | fail-secure strike output |
+| `components/door_fsm` | the door state machine: tap → decision (one owner, queue-fed) |
+| `components/power` | battery telemetry + low-battery release gate |
 | `components/store` | allow-list cache + event ring (encrypted NVS / encrypted data partition) |
 | `components/sync` | allow-list poll + event batch upload (60 s poll) |
 | `components/clock` | NTP + server `Date` fallback |
