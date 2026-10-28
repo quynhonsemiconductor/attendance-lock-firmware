@@ -48,6 +48,18 @@ jobs:
     # guesswork; the cache step archives the same literal path.
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      # The canonical CI determinism set. Measured: two runs of the SAME commit
+      # on the same pinned image restored a 46 MB cache and still hit 0/947 —
+      # default hashing (cwd in the key, mtime-based compiler check, ctime/
+      # mtime-sensitive manifests) is not stable across fresh checkouts. These
+      # four settings are what the ccache manual itself recommends for CI.
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: '1'
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,file_stat_matches_rr,pch_defines,time_macros
+      # Diagnose, do not guess: on a miss the log names the reason, so a still-
+      # zero hit rate after this change is READ out of the log, not re-theorized.
+      CCACHE_LOGFILE: ${{ github.workspace }}/ccache.log
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         # Builds an image; never pushes a git ref.
@@ -113,6 +125,17 @@ jobs:
       - name: ccache stats (after the build)
         if: always()
         run: ccache --show-stats || ccache -s
+
+      # The log says WHY anything missed (key changed, manifest mismatch, first
+      # compilation). 5 MB ceiling: ccache logs one line per invocation.
+      - name: Keep the ccache log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ccache-log-${{ matrix.profile }}
+          path: ccache.log
+          retention-days: 7
+          if-no-files-found: ignore
 
       # The prod build must prove its hardening, not just compile (ADR §2.8).
       # grep over the RESOLVED sdkconfig: catches a typo'd Kconfig symbol that
