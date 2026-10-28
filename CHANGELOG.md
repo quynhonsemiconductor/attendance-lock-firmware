@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/quynhonsemiconductor/attendance-lock-firmware/compare/v0.1.0...v0.2.0) (2026-10-28)
+
+
+### Features
+
+* **provision:** runtime provisioning console over uart0 ([#23](https://github.com/quynhonsemiconductor/attendance-lock-firmware/issues/23)) ([0a96979](https://github.com/quynhonsemiconductor/attendance-lock-firmware/commit/0a96979f9121ac66318b2e22a04277b3f821728c))
+
+
+### Bug Fixes
+
+* **reader:** rc522 never transmitted REQA; timer, rx errors, anticollision, sleep-safe pins ([#25](https://github.com/quynhonsemiconductor/attendance-lock-firmware/issues/25)) ([330468d](https://github.com/quynhonsemiconductor/attendance-lock-firmware/commit/330468d786ff3ee3c55a3c6b5e9955c80a354e72))
+* **store:** a blank nvs namespace reads as absent, not error ([#22](https://github.com/quynhonsemiconductor/attendance-lock-firmware/issues/22)) ([161c5a1](https://github.com/quynhonsemiconductor/attendance-lock-firmware/commit/161c5a1a2dc64450119a112ce6a84a0aafedc085))
+* **sync:** capture body/headers from HTTP events, drain ring per session ([#26](https://github.com/quynhonsemiconductor/attendance-lock-firmware/issues/26)) ([c64c9e8](https://github.com/quynhonsemiconductor/attendance-lock-firmware/commit/c64c9e81e1df331bd947a058be058b6582378b3b))
+
 ## 0.1.0 (2026-10-26)
 
 
