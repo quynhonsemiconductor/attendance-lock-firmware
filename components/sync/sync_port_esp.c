@@ -21,6 +21,7 @@
 #include "sdkconfig.h"
 
 #include "power/power.h"
+#include "power/power_calc.h"
 #include "sync/sync.h"
 
 static const char *TAG = "sync";
