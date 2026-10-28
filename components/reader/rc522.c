@@ -32,8 +32,8 @@
 #define REG_RF_CFG 0x26
 #define REG_T_MODE 0x2A
 #define REG_T_PRESCALER 0x2B
-#define REG_T_RELOAD_LSB 0x2C
-#define REG_T_RELOAD_MSB 0x2D
+#define REG_T_RELOAD_MSB 0x2C // TReloadReg high byte (datasheet table 20)
+#define REG_T_RELOAD_LSB 0x2D
 #define REG_VERSION 0x37
 
 #define CMD_IDLE 0x00
@@ -44,6 +44,9 @@
 #define IRQ_TIMER 0x01
 #define ERR_FRAME 0x13 // BufferOfl|ParityErr|ProtocolErr — bad frame, retry next poll
 #define ERR_CRC 0x04   // CRCErr — bad CRC on a CRC-on exchange (select), retry next poll
+#define ERR_COLL 0x08  // CollErr — two cards answered; CollReg holds the first clash
+#define COLL_POS_NOT_VALID 0x20
+#define COLL_POS_MASK 0x1F
 
 #define PICC_REQA 0x26
 #define PICC_ANTICOLL_CL1 0x93
@@ -113,14 +116,23 @@ static void antenna_off(const rc522_conf_t *conf)
     write_reg(conf, REG_TX_CONTROL, (uint8_t)(read_reg(conf, REG_TX_CONTROL) & ~0x03));
 }
 
+typedef enum {
+    XFER_NONE = 0,  // no answer, bad frame or bad CRC: "no card this poll"
+    XFER_OK,        // clean reply in rx
+    XFER_COLLISION, // reply in rx up to the clash; CollReg says where
+} xfer_t;
+
 // Transceive with the timer guarding "no card answered" (25 ms) and a
 // ~36 ms software bound behind it in case the IRQ flags never arrive.
-// CRC off; callers
-// needing CRC set TxMode/RxMode first. Returns reply length or 0 on
-// timeout/overrun (both are "no card this poll", not a reader fault).
-static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_len,
-                         uint8_t bit_framing, uint8_t *rx, size_t rx_cap)
+// CRC off; callers needing CRC set TxMode/RxMode first. bit_framing carries
+// RxAlign (bits 6..4) + TxLastBits (bits 2..0); with RxAlign set, rx[0]
+// keeps its low RxAlign bits (the caller's known bits) and takes the rest
+// from the reply. *rx_len gets the bytes read. Timeout and overrun are both
+// "no card this poll", never a reader fault.
+static xfer_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_len,
+                         uint8_t bit_framing, uint8_t *rx, size_t rx_cap, size_t *rx_len)
 {
+    *rx_len = 0;
     write_reg(conf, REG_COM_IRQ, 0x7F); // clear every IRQ flag
     write_reg(conf, REG_FIFO_LEVEL, 0x80); // flush FIFO
     write_fifo(conf, tx, tx_len);
@@ -138,28 +150,105 @@ static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
             break;
         }
         if (irq & IRQ_TIMER) {
-            return 0;
+            return XFER_NONE;
         }
         if (read_reg(conf, REG_ERROR) & ERR_FRAME) {
-            return 0;
+            return XFER_NONE;
         }
     }
     if (!got_rx) {
-        return 0; // software bound hit: the FIFO still holds our own TX bytes
+        return XFER_NONE; // software bound hit: the FIFO still holds our own TX bytes
     }
-    // CRCErr latches only on CRC-on exchanges (select/halt): a reply with a
-    // bad CRC must not reach the caller as a valid frame.
-    if (read_reg(conf, REG_ERROR) & ERR_CRC) {
-        return 0;
+    // RxIRq fires on a damaged frame too: the error flags decide. CRCErr
+    // latches only on CRC-on exchanges (select/halt).
+    uint8_t err = read_reg(conf, REG_ERROR);
+    if (err & (ERR_FRAME | ERR_CRC)) {
+        return XFER_NONE;
     }
     uint8_t n = read_reg(conf, REG_FIFO_LEVEL);
     if (n > rx_cap) {
         n = (uint8_t)rx_cap;
     }
+    uint8_t rx_align = (uint8_t)((bit_framing >> 4) & 0x07);
     for (uint8_t i = 0; i < n; i++) {
-        rx[i] = read_reg(conf, REG_FIFO_DATA);
+        uint8_t b = read_reg(conf, REG_FIFO_DATA);
+        if (i == 0 && rx_align != 0) {
+            uint8_t mask = (uint8_t)(0xFF << rx_align);
+            b = (uint8_t)((rx[0] & ~mask) | (b & mask));
+        }
+        rx[i] = b;
     }
-    return n;
+    *rx_len = n;
+    return (err & ERR_COLL) ? XFER_COLLISION : XFER_OK;
+}
+
+// ISO 14443-3 anticollision + SELECT at cascade level 1 — miguelbalboa's
+// PICC_Select loop, CL1 only. buf = SEL, NVB, UID0..3, BCC. On a clash the
+// bit at CollPos is taken as 1 and the loop asks again with one more known
+// bit, so two cards in one wallet still yield one of them per poll instead
+// of neither. uid_cl1 gets the 4 CL1 bytes on success.
+static bool select_cl1(const rc522_conf_t *conf, uint8_t *uid_cl1)
+{
+    uint8_t buf[9] = { PICC_ANTICOLL_CL1 };
+    int known_bits = 0;
+    bool bcc_received = false; // false when bit 32 itself was a clash
+    // ValuesAfterColl = 0: bits after a clash read back as 0, CollReg valid.
+    write_reg(conf, REG_COLL, (uint8_t)(read_reg(conf, REG_COLL) & 0x7F));
+    for (int round = 0; round <= 32; round++) {
+        size_t n = 0;
+        if (known_bits >= 32) {
+            uint8_t bcc = (uint8_t)(buf[2] ^ buf[3] ^ buf[4] ^ buf[5]);
+            if (bcc_received && buf[6] != bcc) {
+                return false; // corrupt anticoll reply: try again next poll
+            }
+            buf[6] = bcc;
+            if (buf[2] == PICC_CASCADE_TAG) {
+                ESP_LOGI(TAG, "cs=%d: 7/10-byte UID (cascade) not supported — card skipped",
+                         conf->cs_gpio);
+                return false;
+            }
+            uint8_t sak[3];
+            buf[1] = 0x70; // NVB: all 40 bits, this is SELECT
+            write_reg(conf, REG_TX_MODE, 0x80); // CRC on for select + halt
+            write_reg(conf, REG_RX_MODE, 0x80);
+            if (transceive(conf, buf, 7, 0x00, sak, sizeof(sak), &n) != XFER_OK || n == 0) {
+                return false; // card answered anticoll but failed select — gone or flaky
+            }
+            memcpy(uid_cl1, &buf[2], 4);
+            return true;
+        }
+        uint8_t tx_last_bits = (uint8_t)(known_bits % 8);
+        uint8_t index = (uint8_t)(2 + known_bits / 8); // first byte the card fills
+        buf[1] = (uint8_t)((index << 4) | tx_last_bits); // NVB: bytes + bits we send
+        size_t tx_len = index + (tx_last_bits ? 1 : 0);
+        write_reg(conf, REG_TX_MODE, 0x00); // CRC off for anticoll
+        write_reg(conf, REG_RX_MODE, 0x00);
+        xfer_t r = transceive(conf, buf, tx_len, (uint8_t)((tx_last_bits << 4) | tx_last_bits),
+                              &buf[index], sizeof(buf) - index, &n);
+        if (r == XFER_NONE) {
+            return false;
+        }
+        if (r == XFER_OK) {
+            known_bits = 32; // whole CL1 UID + BCC in buf: select next round
+            bcc_received = true;
+            continue;
+        }
+        uint8_t coll = read_reg(conf, REG_COLL);
+        if (coll & COLL_POS_NOT_VALID) {
+            return false;
+        }
+        int pos = coll & COLL_POS_MASK;
+        if (pos == 0) {
+            pos = 32; // 0 means the 32nd bit
+        }
+        if (pos <= known_bits) {
+            return false; // no progress: give up this poll
+        }
+        known_bits = pos;
+        int bit = (known_bits - 1) % 8;
+        buf[1 + known_bits / 8 + ((known_bits % 8) ? 1 : 0)] |= (uint8_t)(1u << bit);
+    }
+    return false;
 }
 
 bool rc522_bus_init(int spi_host, int sck, int miso, int mosi)
@@ -189,24 +278,37 @@ bool rc522_bus_init(int spi_host, int sck, int miso, int mosi)
     return spi_bus_add_device((spi_host_device_t)spi_host, &dev, &s_spi) == ESP_OK;
 }
 
-// Boot-time bring-up: pins high (CS high keeps the chip off the bus), hard
-// reset, init, health check, powered down. The RST pin doubles as the
-// power-down control (NRSTPD): low = power-down between polls.
-bool rc522_init(const rc522_conf_t *conf)
+// CS high (chip off the shared bus) and RST low (hard power-down). Levels
+// are set before the pins turn into outputs so neither glitches. The pins
+// are taken out of the sleep-time GPIO switch (CONFIG_PM_SLP_DISABLE_GPIO):
+// otherwise every tickless light sleep floats them — RST mid-wake and the
+// CS of an idle reader — and the "powered down between polls" state is
+// not actually held.
+void rc522_pins_init(const rc522_conf_t *conf)
 {
     uint64_t mask = 1ULL << conf->cs_gpio;
+    gpio_set_level(conf->cs_gpio, 1);
     if (conf->rst_gpio >= 0) {
         mask |= 1ULL << conf->rst_gpio;
+        gpio_set_level(conf->rst_gpio, 0);
     }
     gpio_config_t io = {
         .pin_bit_mask = mask,
         .mode = GPIO_MODE_OUTPUT,
     };
     (void)gpio_config(&io);
-    gpio_set_level(conf->cs_gpio, 1);
+    (void)gpio_sleep_sel_dis(conf->cs_gpio);
     if (conf->rst_gpio >= 0) {
-        gpio_set_level(conf->rst_gpio, 1);
+        (void)gpio_sleep_sel_dis(conf->rst_gpio);
     }
+}
+
+// Boot-time bring-up: pins (CS high, RST low), then the wake poll's hard
+// reset (RST rising edge), init, health check. The RST pin doubles as the
+// power-down control (NRSTPD): low = power-down between polls.
+bool rc522_init(const rc522_conf_t *conf)
+{
+    rc522_pins_init(conf);
     return rc522_wake_poll(conf, NULL, NULL) != RC522_FAULT;
 }
 
@@ -247,36 +349,24 @@ rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint
     rc522_poll_result_t result = RC522_NONE;
     uint8_t reqa = PICC_REQA;
     uint8_t atqa[2];
+    size_t n = 0;
     write_reg(conf, REG_TX_MODE, 0x00); // CRC off for REQIDL + anticoll
     write_reg(conf, REG_RX_MODE, 0x00);
-    if (transceive(conf, &reqa, 1, 0x07, atqa, sizeof(atqa)) != sizeof(atqa)) {
+    // Several cards answer REQA at once and their ATQAs clash: that is
+    // still "a card is here" (miguelbalboa's PICC_IsNewCardPresent).
+    xfer_t r = transceive(conf, &reqa, 1, 0x07, atqa, sizeof(atqa), &n);
+    if (r == XFER_NONE || (r == XFER_OK && n != sizeof(atqa))) {
         goto out; // no card in the field — the common case
     }
-    uint8_t reply[5];
-    uint8_t anticoll[2] = { PICC_ANTICOLL_CL1, 0x20 };
-    if (transceive(conf, anticoll, sizeof(anticoll), 0x00, reply, sizeof(reply)) != 5) {
-        goto out; // collision or bad frame: try again next poll
-    }
-    uint8_t bcc = (uint8_t)(reply[0] ^ reply[1] ^ reply[2] ^ reply[3]);
-    if (reply[4] != bcc || reply[0] == PICC_CASCADE_TAG) {
-        if (reply[4] == bcc && reply[0] == PICC_CASCADE_TAG) {
-            ESP_LOGI(TAG, "cs=%d: 7/10-byte UID (cascade) not supported — card skipped",
-                     conf->cs_gpio);
-        }
-        goto out;
-    }
-    uint8_t select[7] = { PICC_SELECT_CL1, 0x70, reply[0], reply[1], reply[2], reply[3], bcc };
-    uint8_t sak[3];
-    write_reg(conf, REG_TX_MODE, 0x80); // CRC on for select + halt
-    write_reg(conf, REG_RX_MODE, 0x80);
-    size_t sak_len = transceive(conf, select, sizeof(select), 0x00, sak, sizeof(sak));
-    if (sak_len == 0) {
-        goto out; // card answered anticoll but failed select — gone or flaky
+    uint8_t uid_cl1[4];
+    if (!select_cl1(conf, uid_cl1)) {
+        goto out; // bad frame, cascade UID or card gone: try again next poll
     }
     uint8_t halt[2] = { PICC_HALT, 0x00 };
-    (void)transceive(conf, halt, sizeof(halt), 0x00, sak, sizeof(sak));
+    uint8_t ignored[3];
+    (void)transceive(conf, halt, sizeof(halt), 0x00, ignored, sizeof(ignored), &n);
     if (uid != NULL && uid_len != NULL && *uid_len >= 4) {
-        memcpy(uid, reply, 4);
+        memcpy(uid, uid_cl1, 4);
         *uid_len = 4;
     }
     result = RC522_CARD;

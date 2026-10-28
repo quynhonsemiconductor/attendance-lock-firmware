@@ -113,6 +113,9 @@ void reader_start(void (*on_card)(const reader_card_t *card),
     s_conf[1] = (rc522_conf_t){ CONFIG_READER_SPI_HOST, CONFIG_READER_CS_IN,
                                 CONFIG_READER_RST_IN };
     for (int i = 0; i < 2; i++) {
+        rc522_pins_init(&s_conf[i]); // both CS high before either reader talks
+    }
+    for (int i = 0; i < 2; i++) {
         s_online[i] = rc522_init(&s_conf[i]);
         if (!s_online[i]) {
             ESP_LOGW(TAG, "reader %d offline at boot — probing every %d ms", i,

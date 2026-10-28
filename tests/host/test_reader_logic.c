@@ -26,6 +26,24 @@ void test_tap_logic_debounce_and_cross_read(void)
     TEST_ASSERT_TRUE(reader_accept(state, sizeof(state), &d, 2600, 1000, 800));
 }
 
+void test_tap_logic_full_table_evicts_least_recent(void)
+{
+    uint8_t state[STATE_CAP] = { 0 };
+    // Fill all 8 slots: cards 1..8 at 1000, 1100, ... 1700.
+    for (uint8_t k = 1; k <= 8; k++) {
+        reader_card_t c = { .reader = 0, .uid_len = 4, .uid = { k, k, k, k } };
+        TEST_ASSERT_TRUE(reader_accept(state, sizeof(state), &c, 900 + 100u * k, 1000, 800));
+    }
+    // Card 1 (slot 0) tapped again: now the most recent entry.
+    reader_card_t c1 = { .reader = 0, .uid_len = 4, .uid = { 1, 1, 1, 1 } };
+    TEST_ASSERT_TRUE(reader_accept(state, sizeof(state), &c1, 2500, 1000, 800));
+    // A 9th card evicts card 2 (oldest), not slot 0.
+    reader_card_t c9 = { .reader = 0, .uid_len = 4, .uid = { 9, 9, 9, 9 } };
+    TEST_ASSERT_TRUE(reader_accept(state, sizeof(state), &c9, 2600, 1000, 800));
+    // Card 1 still held: its debounce state survived.
+    TEST_ASSERT_FALSE(reader_accept(state, sizeof(state), &c1, 2700, 1000, 800));
+}
+
 void test_tap_logic_bad_state_rejected(void)
 {
     reader_card_t c = { .reader = 0, .uid_len = 4, .uid = { 1 } };
@@ -38,6 +56,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_tap_logic_debounce_and_cross_read);
+    RUN_TEST(test_tap_logic_full_table_evicts_least_recent);
     RUN_TEST(test_tap_logic_bad_state_rejected);
     return UNITY_END();
 }
