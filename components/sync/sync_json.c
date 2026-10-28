@@ -127,10 +127,13 @@ size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
     }
     emit_str(&e, "\",\"dropped\":");
     emit_u32(&e, dropped);
-    emit_str(&e, ",\"battery_mv\":");
-    emit_u32(&e, battery_mv);
-    emit_str(&e, ",\"low_battery\":");
-    emit_str(&e, low_battery ? "true" : "false");
+    if (battery_mv != 0) { // 0 = no reading this session: omit BOTH fields —
+        // the server must not read an absent pack as 0 mV and alert
+        emit_str(&e, ",\"battery_mv\":"); // (round-2 review item 1)
+        emit_u32(&e, battery_mv);
+        emit_str(&e, ",\"low_battery\":");
+        emit_str(&e, low_battery ? "true" : "false");
+    }
     emit_str(&e, ",\"events\":[");
     for (size_t i = 0; i < n_events; i++) {
         if (i > 0) {
@@ -149,6 +152,34 @@ size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
         e.buf[e.len] = '\0';
     }
     return e.ok ? e.len : 0;
+}
+
+// --- response-body accumulator (round-2 review item 4) ------------------
+//
+// Bounded sink for streamed body chunks (the ESP port feeds it from
+// HTTP_EVENT_ON_DATA). Same rule as the host port: cap-1 usable bytes, and
+// once more data arrives than fits the accumulator latches overflow — an
+// oversized body must never arrive as a silently truncated 200.
+
+void sync_body_acc_init(sync_body_acc_t *acc, char *buf, size_t cap)
+{
+    acc->buf = buf;
+    acc->cap = cap;
+    acc->len = 0;
+    acc->overflow = false;
+}
+
+bool sync_body_acc_add(sync_body_acc_t *acc, const char *data, size_t n)
+{
+    if (!acc->overflow && acc->buf != NULL) {
+        if (acc->len + n > acc->cap - 1) {
+            acc->overflow = true;
+        } else {
+            memcpy(acc->buf + acc->len, data, n);
+            acc->len += n;
+        }
+    }
+    return !acc->overflow; // callers keep draining, then fail the exchange
 }
 
 // --- decode: a small skipping JSON scanner ------------------------------

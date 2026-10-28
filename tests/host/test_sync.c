@@ -266,7 +266,7 @@ void test_encode_envelope_matches_fixture(void)
     TEST_ASSERT_EQUAL_STRING(want, out);
 }
 
-void test_encode_envelope_clamps_dropped_and_always_carries_battery(void)
+void test_encode_envelope_clamp_and_battery_omission_rules(void)
 {
     uint8_t stream[16] = { 0 };
     char out[256];
@@ -276,6 +276,39 @@ void test_encode_envelope_clamps_dropped_and_always_carries_battery(void)
     TEST_ASSERT_TRUE(strstr(out, "\"battery_mv\":4900") != NULL); // empty batch:
     TEST_ASSERT_TRUE(strstr(out, "\"low_battery\":true") != NULL); // heartbeat
     TEST_ASSERT_TRUE(strstr(out, "\"events\":[]") != NULL);
+    // No reading (battery_mv == 0): BOTH fields are omitted — the server
+    // must not read an absent pack as 0 mV (round-2 review item 1).
+    n = sync_encode_envelope(stream, 0, 0, false, NULL, 0, out, sizeof(out));
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_NULL(strstr(out, "battery_mv"));
+    TEST_ASSERT_NULL(strstr(out, "low_battery"));
+}
+
+// --- body accumulator (round-2 review item 4) ---------------------------
+
+void test_body_acc_fills_exact_and_latches_overflow(void)
+{
+    char buf[8];
+    sync_body_acc_t acc;
+    sync_body_acc_init(&acc, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(sync_body_acc_add(&acc, "abcd", 4));
+    TEST_ASSERT_TRUE(sync_body_acc_add(&acc, "ef", 2)); // 6 <= cap-1
+    TEST_ASSERT_EQUAL_size_t(6, acc.len);
+    TEST_ASSERT_FALSE(acc.overflow);
+    // one byte past cap-1 latches overflow; more chunks stay latched
+    TEST_ASSERT_FALSE(sync_body_acc_add(&acc, "XY", 2));
+    TEST_ASSERT_TRUE(acc.overflow);
+    TEST_ASSERT_EQUAL_size_t(6, acc.len); // nothing truncated in
+    TEST_ASSERT_FALSE(sync_body_acc_add(&acc, "Z", 1));
+    TEST_ASSERT_TRUE(acc.overflow);
+    TEST_ASSERT_EQUAL_size_t(6, acc.len);
+    TEST_ASSERT_EQUAL_MEMORY("abcdef", buf, 6);
+    // exact fit (cap-1) is NOT overflow
+    char buf2[8];
+    sync_body_acc_init(&acc, buf2, sizeof(buf2));
+    TEST_ASSERT_TRUE(sync_body_acc_add(&acc, "1234567", 7));
+    TEST_ASSERT_EQUAL_size_t(7, acc.len);
+    TEST_ASSERT_FALSE(acc.overflow);
 }
 
 // --- session ------------------------------------------------------------
@@ -330,6 +363,13 @@ void test_session_heartbeat_battery_without_events(void)
     TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"low_battery\":true") != NULL);
     TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"events\":[]") != NULL);
     TEST_ASSERT_EQUAL_INT(1, sync_host_post_count);
+    // and with NO reading the heartbeat omits the battery fields entirely
+    sync_host_set_battery(0, false);
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "battery_mv"));
+    TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "low_battery"));
 }
 
 void test_session_uploads_batch_and_acks(void)
@@ -583,6 +623,27 @@ void test_session_stops_when_round_makes_no_progress(void)
     TEST_ASSERT_EQUAL_size_t(1, store_event_batch(out, STORE_BATCH_MAX));
 }
 
+void test_session_corrupt_only_batch_cleared_locally(void)
+{
+    // Round-2 review item 2: a batch of ONLY poison records can never
+    // upload; waiting for a server ack would wedge the ring in backoff
+    // forever. The poison seqs are cleared locally and the session still
+    // reports the drops and ends clean.
+    uint8_t poison[sizeof(sync_event_t)];
+    sync_event_t bad = { 0 }; // uid_len 0: fails to encode
+    memcpy(poison, &bad, sizeof(bad));
+    TEST_ASSERT_TRUE(store_event_push(poison, sizeof(poison), NULL)); // seq 1
+    TEST_ASSERT_TRUE(store_event_push(poison, sizeof(poison), NULL)); // seq 2
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run()); // poison cleared, not wedged
+    store_event_t out[STORE_BATCH_MAX];
+    TEST_ASSERT_EQUAL_size_t(0, store_event_batch(out, STORE_BATCH_MAX));
+    // both drops went out in the report envelope
+    TEST_ASSERT_TRUE(strstr(sync_host_first_post.body, "\"dropped\":2") != NULL);
+    TEST_ASSERT_TRUE(strstr(sync_host_first_post.body, "\"events\":[]") != NULL);
+}
+
 void test_session_etag_round_trips_byte_exact(void)
 {
     // The server ETag is a quoted 64-hex digest (66 bytes) — it must fit
@@ -643,7 +704,8 @@ int main(void)
     RUN_TEST(test_encode_event_matches_fixture_fields);
     RUN_TEST(test_encode_event_unsynced_and_denied_out);
     RUN_TEST(test_encode_envelope_matches_fixture);
-    RUN_TEST(test_encode_envelope_clamps_dropped_and_always_carries_battery);
+    RUN_TEST(test_encode_envelope_clamp_and_battery_omission_rules);
+    RUN_TEST(test_body_acc_fills_exact_and_latches_overflow);
     RUN_TEST(test_session_allow_list_200_replaces_cache);
     RUN_TEST(test_session_304_keeps_cache_and_sends_etag);
     RUN_TEST(test_session_heartbeat_battery_without_events);
@@ -661,6 +723,7 @@ int main(void)
     RUN_TEST(test_session_uses_date_header_when_unsynced);
     RUN_TEST(test_session_drains_ring_in_batches);
     RUN_TEST(test_session_stops_when_round_makes_no_progress);
+    RUN_TEST(test_session_corrupt_only_batch_cleared_locally);
     RUN_TEST(test_session_etag_round_trips_byte_exact);
     RUN_TEST(test_next_delay_interval_when_clean);
     RUN_TEST(test_next_delay_backoff_grows_and_caps);

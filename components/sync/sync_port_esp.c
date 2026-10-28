@@ -71,10 +71,11 @@ static EventGroupHandle_t s_wifi_events;
 // once but esp_wifi_init/deinit per session left the netif attached to a
 // destroyed driver, so session 2+ could come up with no IP (E2E review
 // 2026-10-28, firmware item 7): netif and driver now live together.
-static bool s_radio_inited;
-static bool s_netif_created; // partial-init guard: never create the STA
-// netif twice — a second default-sta netif would leave the first attached
-// to nothing and the IP events would race.
+// Each step keeps its OWN done-flag: a failure partway through init must
+// not leak the event group or double-register the IP handler on the retry
+// (round-2 review item 5).
+static bool s_netif_inited, s_loop_inited, s_netif_created, s_events_created,
+    s_handler_registered, s_driver_inited;
 
 static void wifi_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -111,35 +112,47 @@ bool sync_port_wifi_up(void)
         ESP_LOGW(TAG, "no wifi credentials provisioned");
         return false;
     }
-    if (!s_radio_inited) {
+    if (!s_netif_inited) {
         if (esp_netif_init() != ESP_OK) {
             return false;
         }
+        s_netif_inited = true;
+    }
+    if (!s_loop_inited) {
         esp_err_t e = esp_event_loop_create_default();
         if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
             return false;
         }
-        if (!s_netif_created) {
-            if (esp_netif_create_default_wifi_sta() == NULL) {
-                return false;
-            }
-            s_netif_created = true;
+        s_loop_inited = true;
+    }
+    if (!s_netif_created) { // never twice: a second default-sta netif would
+        if (esp_netif_create_default_wifi_sta() == NULL) { // leave the first
+            return false; // attached to nothing and the IP events would race
         }
+        s_netif_created = true;
+    }
+    if (!s_events_created) {
         s_wifi_events = xEventGroupCreate();
         if (s_wifi_events == NULL) {
             return false;
         }
+        s_events_created = true;
+    }
+    if (!s_handler_registered) { // exactly once across all sessions
         if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_ip_event, NULL) !=
             ESP_OK) {
             return false;
         }
+        s_handler_registered = true;
+    }
+    if (!s_driver_inited) {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         if (esp_wifi_init(&cfg) != ESP_OK ||
             esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
             esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) {
             return false;
         }
-        s_radio_inited = true;
+        s_driver_inited = true;
     }
     // Per session: (re)apply credentials — the console may have
     // re-provisioned since the last session — then start/connect.
@@ -165,8 +178,8 @@ bool sync_port_wifi_up(void)
 
 void sync_port_wifi_down(void)
 {
-    // stop only: the driver + netif stay up for the next session (see
-    // s_radio_inited above).
+    // stop only: the driver + netif stay up for the next session (the
+    // per-step init flags above).
     esp_wifi_disconnect();
     esp_wifi_stop();
 }
@@ -181,19 +194,18 @@ void sync_port_battery(uint16_t *battery_mv, bool *low_battery)
     *low_battery = power_is_low(mv, CONFIG_POWER_BATTERY_LOW_MV);
 }
 
-// What the HTTP event handler captures from one exchange. The body is taken
-// from HTTP_EVENT_ON_DATA (esp_http_client_perform CONSUMES the body —
-// reading it back with esp_http_client_read after perform returns 0 bytes,
-// so every 200 looked malformed; E2E review 2026-10-28, firmware item 1),
-// ETag and Date from HTTP_EVENT_ON_HEADER (esp_http_client_get_header
-// reads the REQUEST headers — it can never see a response ETag; item 2).
+// What the HTTP event handler captures from one exchange. The body goes
+// through sync_body_acc_add (the host-tested bounded accumulator; round-2
+// review item 4) fed from HTTP_EVENT_ON_DATA — esp_http_client_perform
+// CONSUMES the body, so reading it back with esp_http_client_read after
+// perform returns 0 bytes and every 200 looked malformed (E2E review
+// 2026-10-28, firmware item 1). ETag and Date come from
+// HTTP_EVENT_ON_HEADER (esp_http_client_get_header reads the REQUEST
+// headers — it can never see a response ETag; item 2).
 // SAVE_RESPONSE_HEADERS is deliberately NOT used: its header store caps at
 // 10 fields and helmet adds more, so the capture would be a lottery.
 typedef struct {
-    char *resp;
-    size_t cap; // total capacity; cap-1 usable bytes + NUL
-    size_t len;
-    bool overflow; // more body followed than fit: failure, never truncation
+    sync_body_acc_t body;
     char *etag;
     size_t etag_cap;
     char *date;
@@ -217,14 +229,9 @@ static esp_err_t http_event_cb(esp_http_client_event_t *evt)
         }
         break;
     case HTTP_EVENT_ON_DATA:
-        if (cap->resp != NULL) {
-            if (cap->len + (size_t)evt->data_len > cap->cap - 1) {
-                cap->overflow = true; // keep draining, then fail the call
-            } else {
-                memcpy(cap->resp + cap->len, evt->data, (size_t)evt->data_len);
-                cap->len += (size_t)evt->data_len;
-            }
-        }
+        // return value ignored on purpose: keep draining, the overflow latch
+        // fails the exchange after perform returns
+        (void)sync_body_acc_add(&cap->body, evt->data, (size_t)evt->data_len);
         break;
     default:
         break;
@@ -242,13 +249,12 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
         return false;
     }
     http_capture_t capture = {
-        .resp = resp,
-        .cap = cap,
         .etag = etag,
         .etag_cap = etag_cap,
         .date = date,
         .date_cap = date_cap,
     };
+    sync_body_acc_init(&capture.body, resp, cap);
     esp_http_client_config_t cfg = {
         .url = full,
         .method = strcmp(method, "POST") == 0 ? HTTP_METHOD_POST : HTTP_METHOD_GET,
@@ -286,17 +292,17 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     bool ok = false;
     esp_err_t e = esp_http_client_perform(c);
     if (e == ESP_OK) {
-        if (capture.overflow) {
-            // Same rule as sync_read_body on the host: an oversized body is
-            // a transport failure, never a silently truncated 200 (a
-            // truncated allow-list would freeze revocations).
+        if (capture.body.overflow) {
+            // Same rule as the host port: an oversized body is a transport
+            // failure, never a silently truncated 200 (a truncated
+            // allow-list would freeze revocations).
             ESP_LOGW(TAG, "response body over %u bytes: failing, not truncating",
                      (unsigned)(cap - 1));
         } else {
             *status = (long)esp_http_client_get_status_code(c);
             if (resp != NULL) {
-                resp[capture.len] = '\0';
-                *resp_len = capture.len;
+                resp[capture.body.len] = '\0';
+                *resp_len = capture.body.len;
             } else {
                 *resp_len = 0;
             }

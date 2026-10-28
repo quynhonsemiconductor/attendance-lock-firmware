@@ -152,6 +152,17 @@ bool sync_session_run(void)
             }
             s_batch[n_good++] = s_batch[i];
         }
+        // A batch of ONLY corrupt records can never upload — waiting for a
+        // server ack would wedge the ring in ok=false/backoff forever. Clear
+        // the poison seqs locally; the dropped REPORT still rides this
+        // envelope (round-2 review item 2).
+        bool cleared_poison = false;
+        if (n_good == 0 && bad_max_seq > 0) {
+            store_ack(bad_max_seq);
+            cleared_poison = true;
+            SYNC_LOGW("batch all-corrupt: cleared through seq=%u locally",
+                      (unsigned)bad_max_seq);
+        }
         size_t body_len = sync_encode_envelope(stream, dropped, battery_mv, low_battery, s_batch,
                                                n_good, s_body, sizeof(s_body));
         long post_status = 0;
@@ -194,10 +205,11 @@ bool sync_session_run(void)
         if (rejected_len > 0) {
             SYNC_LOGW("events rejected: count=%u", (unsigned)rejected_len);
         }
-        if (acked == 0 && n > 0) {
+        if (acked == 0 && n > 0 && !cleared_poison) {
             // 200 but nothing accepted: re-sending the same batch inside
             // this session would only hammer the server — back off to the
-            // next session (the ring keeps everything).
+            // next session (the ring keeps everything). A cleared-poison
+            // round DID make progress, poison or not.
             ok = false;
             break;
         }

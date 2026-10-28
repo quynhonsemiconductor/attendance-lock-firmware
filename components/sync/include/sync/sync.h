@@ -84,13 +84,31 @@ bool sync_decode_events_response(const char *body, size_t len, uint32_t *acked_t
 // Renders the POST /v1/door/terminal/events envelope
 // (fixture: events-request.json) for the given stream + batch.
 // battery_mv/low_battery are envelope-level (door-terminal-v1 contract) and
-// ALWAYS emitted: they carry the session's live measurement, so an empty
-// batch is still a heartbeat that refreshes the server's terminal TTL and
-// battery badge. dropped is clamped to SYNC_DROPPED_REPORT_MAX. Returns
-// bytes written, or 0 when out is too small (nothing is half-written).
+// emitted whenever a reading exists (battery_mv != 0): an empty batch is
+// still a heartbeat that refreshes the server's terminal TTL and battery
+// badge. With NO reading (battery_mv == 0) BOTH fields are omitted — the
+// server must not read an absent pack as 0 mV (round-2 review item 1).
+// dropped is clamped to SYNC_DROPPED_REPORT_MAX. Returns bytes written, or
+// 0 when out is too small (nothing is half-written).
 size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
                             uint16_t battery_mv, bool low_battery,
                             const store_event_t *events, size_t n_events, char *out, size_t cap);
+
+// Bounded accumulator for a streamed response body (round-2 review item 4):
+// the ESP port feeds it from HTTP_EVENT_ON_DATA. cap-1 usable bytes; data
+// past the cap latches overflow — an oversized body must never arrive as a
+// silently truncated 200. Host-tested.
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t len;
+    bool overflow;
+} sync_body_acc_t;
+
+void sync_body_acc_init(sync_body_acc_t *acc, char *buf, size_t cap);
+// Adds one chunk. Returns false once overflow is latched (keep draining,
+// then fail the exchange); the chunk is dropped, never truncated in.
+bool sync_body_acc_add(sync_body_acc_t *acc, const char *data, size_t n);
 
 #ifdef __cplusplus
 }
