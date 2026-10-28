@@ -62,7 +62,15 @@ bool reader_accept(uint8_t *state, size_t state_cap, const reader_card_t *card, 
         }
     }
     if (slot < 0) {
-        slot = 0; // table full: overwrite the oldest slot (index 0)
+        // Table full: evict the least recently seen entry, not a fixed
+        // slot — overwriting slot 0 would drop a card that may still be
+        // held (and re-fire it on the next poll).
+        slot = 0;
+        for (int i = 1; i < READER_MAX_TRACKED; i++) {
+            if ((uint32_t)(now_ms - seen[i].last_ms) > (uint32_t)(now_ms - seen[slot].last_ms)) {
+                slot = i;
+            }
+        }
     }
     seen[slot].used = 1;
     seen[slot].reader = card->reader;

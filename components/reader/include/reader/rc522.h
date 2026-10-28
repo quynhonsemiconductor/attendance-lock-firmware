@@ -16,6 +16,11 @@ typedef struct {
 // hand-driven CS). Returns false on SPI setup failure.
 bool rc522_bus_init(int spi_host, int sck, int miso, int mosi);
 
+// CS high + RST low (powered down), held through light sleep. Run it for
+// EVERY reader before any of them talks on the shared bus: an unconfigured
+// CS can float low and put a second chip on MISO.
+void rc522_pins_init(const rc522_conf_t *conf);
+
 // Boot bring-up: pins, hard reset, init, health check. Does NOT power down
 // — pair with rc522_power_down(). False when the reader fails its health
 // check: that reader is dead but the other keeps working.
