@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "store/store.h"
+#include "store_port.h"
 #include "store_port_host.h"
 
 // Host flash is 4 MiB → 1024 sectors × 63 records.
@@ -433,6 +434,24 @@ void test_stream_uuid_regenerated_after_nvs_wipe(void)
     TEST_ASSERT_NOT_EQUAL(0, memcmp(a, c, 16)); // wipe → new stream (§2.4)
 }
 
+void test_fresh_nvs_namespace_inits_and_keeps_stream(void)
+{
+    // Fresh board: the "store" namespace does not exist until the first
+    // write — reads see ABSENT (never ERROR) and init must still succeed.
+    // Regression for the bench bug: nvs_open(READONLY) NOT_FOUND mapped to
+    // ERROR made store_init fail ("store unavailable") on a blank chip.
+    store_host_reset();
+    uint32_t v = 0;
+    TEST_ASSERT_EQUAL(STORE_PORT_ABSENT, store_port_nvs_get_u32("seqe", &v));
+    TEST_ASSERT_TRUE(store_init()); // boots: no "store unavailable"
+    uint8_t a[16];
+    store_stream_uuid(a);
+    TEST_ASSERT_TRUE(store_init()); // second boot: namespace now exists
+    uint8_t b[16];
+    store_stream_uuid(b);
+    TEST_ASSERT_EQUAL_MEMORY(a, b, 16); // same stream identity
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -456,5 +475,6 @@ int main(void)
     RUN_TEST(test_seq_block_persisted_ahead_of_use);
     RUN_TEST(test_nvs_wipe_new_stream_no_seq_reuse);
     RUN_TEST(test_stream_uuid_regenerated_after_nvs_wipe);
+    RUN_TEST(test_fresh_nvs_namespace_inits_and_keeps_stream);
     return UNITY_END();
 }
