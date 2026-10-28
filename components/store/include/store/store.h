@@ -34,8 +34,11 @@ extern "C" {
 // Card UID: uppercase hex without separators on the wire, 4/7/10 raw bytes
 // here (8/14/20 hex chars, §2.4).
 #define STORE_UID_MAX 10
-// ETag of the last accepted allow-list (opaque server string, §2.4).
-#define STORE_ETAG_MAX 64
+// ETag of the last accepted allow-list (opaque server string, §2.4). The
+// server sends a quoted 64-hex digest — 66 chars + NUL; 80 leaves room for
+// a longer future format. The stored bytes must round-trip byte-exact into
+// If-None-Match or every poll is a 200.
+#define STORE_ETAG_MAX 80
 
 // Card cap, shared by the NVS cache AND the JSON decoder (one number: the
 // decoder refuses a body with more cards than the cache can hold, and the

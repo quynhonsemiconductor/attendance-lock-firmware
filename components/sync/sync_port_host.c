@@ -14,11 +14,20 @@ static char s_ssid[64] = "bench", s_pass[64] = "bench";
 
 static bool wifi_up;
 
-// Request journal (last request wins; the tests assert on it).
+// Request journal (last request wins; the tests assert on it) plus a frozen
+// copy of the last GET (the drain loop's POSTs overwrite the journal).
 sync_port_req_t sync_host_last_request;
+sync_port_req_t sync_host_last_get;
+sync_port_req_t sync_host_first_post;
+int sync_host_post_count;
+
+// Scripted battery reading for the envelope (sent every session).
+static uint16_t s_battery_mv = 5400;
+static bool s_battery_low;
 
 // Scripted responses, consumed in order; an empty script = transport failure.
-#define SCRIPT_MAX 4
+// A drained session (GET + up to N batches) needs one slot per exchange.
+#define SCRIPT_MAX 8
 static sync_port_resp_t script[SCRIPT_MAX];
 static int script_len;
 static int script_pos;
@@ -46,12 +55,21 @@ void sync_port_wifi_down(void)
     wifi_up = false;
 }
 
+void sync_port_battery(uint16_t *battery_mv, bool *low_battery)
+{
+    *battery_mv = s_battery_mv;
+    *low_battery = s_battery_low;
+}
+
 bool sync_port_http(const char *method, const char *url, const char *path, const char *token,
                     const char *if_none_match, const char *body, size_t body_len,
                     long *status, char *resp, size_t cap, size_t *resp_len, char *etag,
                     size_t etag_cap, char *date, size_t date_cap)
 {
     memset(&sync_host_last_request, 0, sizeof(sync_host_last_request));
+    if (strcmp(method, "POST") == 0) {
+        sync_host_post_count++;
+    }
     snprintf(sync_host_last_request.method, sizeof(sync_host_last_request.method), "%s", method);
     snprintf(sync_host_last_request.url, sizeof(sync_host_last_request.url), "%s", url);
     snprintf(sync_host_last_request.path, sizeof(sync_host_last_request.path), "%s", path);
@@ -61,6 +79,12 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     if (body != NULL && body_len < sizeof(sync_host_last_request.body)) {
         memcpy(sync_host_last_request.body, body, body_len);
     }
+    if (strcmp(method, "GET") == 0) {
+        sync_host_last_get = sync_host_last_request; // frozen: POSTs overwrite
+    }
+    if (strcmp(method, "POST") == 0 && sync_host_post_count == 1) {
+        sync_host_first_post = sync_host_last_request; // post_count was just
+    }                                       // incremented to 1 by the first POST
     if (script_pos >= script_len) {
         return false; // scripted transport exhausted = transport failure
     }
@@ -106,6 +130,11 @@ void sync_host_reset(void)
     script_len = 0;
     script_pos = 0;
     memset(&sync_host_last_request, 0, sizeof(sync_host_last_request));
+    memset(&sync_host_last_get, 0, sizeof(sync_host_last_get));
+    memset(&sync_host_first_post, 0, sizeof(sync_host_first_post));
+    sync_host_post_count = 0;
+    s_battery_mv = 5400;
+    s_battery_low = false;
     provisioned = true;
     wifi_up = false;
 }
@@ -120,4 +149,10 @@ void sync_host_enqueue(long status, const char *body, const char *etag, const ch
 void sync_host_set_provisioned(bool on)
 {
     provisioned = on;
+}
+
+void sync_host_set_battery(uint16_t battery_mv, bool low_battery)
+{
+    s_battery_mv = battery_mv;
+    s_battery_low = low_battery;
 }

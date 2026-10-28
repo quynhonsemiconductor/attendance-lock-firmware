@@ -87,12 +87,45 @@ void test_decode_allow_list_fixture(void)
     size_t n = sync_decode_allow_list(fx, strlen(fx), cards, 8, &too_many);
     TEST_ASSERT_FALSE(too_many);
     TEST_ASSERT_NOT_EQUAL(SIZE_MAX, n);
-    TEST_ASSERT_EQUAL_size_t(1, n);
+    // The fixture pins all three card shapes (contract v1: integer epoch
+    // seconds or null): permanent, fully windowed, open-ended.
+    TEST_ASSERT_EQUAL_size_t(3, n);
     TEST_ASSERT_EQUAL_UINT8(4, cards[0].uid_len);
     TEST_ASSERT_EQUAL_UINT8(0x04, cards[0].uid[0]);
     TEST_ASSERT_EQUAL_UINT8(0xC3, cards[0].uid[3]);
     TEST_ASSERT_EQUAL_UINT32(0, cards[0].valid_from); // null windows = 0
     TEST_ASSERT_EQUAL_UINT32(0, cards[0].valid_until);
+    TEST_ASSERT_EQUAL_UINT8(7, cards[1].uid_len);
+    TEST_ASSERT_EQUAL_UINT32(1790000000, cards[1].valid_from);
+    TEST_ASSERT_EQUAL_UINT32(1799999999, cards[1].valid_until);
+    TEST_ASSERT_EQUAL_UINT8(10, cards[2].uid_len);
+    TEST_ASSERT_EQUAL_UINT32(1790000000, cards[2].valid_from);
+    TEST_ASSERT_EQUAL_UINT32(0, cards[2].valid_until); // until null
+}
+
+void test_decode_allow_list_256_cards_fit_resp_cap(void)
+{
+    // The decoder cap and the response buffer are one budget (STORE_CARDS_MAX
+    // shares SYNC_RESP_CAP): a worst-case 256-card body — 10-byte UIDs, both
+    // windows as 10-digit epochs — must FIT the buffer the session reads
+    // into, or a full building would arrive as a permanent "malformed".
+    static char body[SYNC_RESP_CAP + 256];
+    size_t off = (size_t)snprintf(body, sizeof(body), "{\"cards\":[");
+    for (int i = 0; i < 256; i++) {
+        off += (size_t)snprintf(body + off, sizeof(body) - off,
+                                "%s{\"uid\":\"%04X%016X\",\"valid_from\":1790000000,"
+                                "\"valid_until\":1799999999}",
+                                i > 0 ? "," : "", i & 0xFFFF, (unsigned)i * 2654435761u);
+        TEST_ASSERT_TRUE(off < sizeof(body));
+    }
+    snprintf(body + off, sizeof(body) - off, "]}");
+    TEST_ASSERT_TRUE(strlen(body) < SYNC_RESP_CAP); // fits cap-1 + NUL
+    static store_card_t cards[STORE_CARDS_MAX];
+    bool too_many = true;
+    size_t n = sync_decode_allow_list(body, strlen(body), cards, STORE_CARDS_MAX, &too_many);
+    TEST_ASSERT_FALSE(too_many);
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX, n);
+    TEST_ASSERT_EQUAL_size_t(STORE_CARDS_MAX, n);
 }
 
 void test_decode_allow_list_unknown_fields_tolerated(void)
@@ -225,12 +258,24 @@ void test_encode_envelope_matches_fixture(void)
     uint8_t stream[16] = { 0x6f, 0x1a, 0x2b, 0x3c, 0x00, 0x00, 0x40, 0x00,
                            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
     char out[1024];
-    size_t n = sync_encode_envelope(stream, 0, &ev, 1, out, sizeof(out));
+    size_t n = sync_encode_envelope(stream, 0, 5400, false, &ev, 1, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     char want[1024];
     strcpy(want, fixture("events-request.json"));
     minify(want);
     TEST_ASSERT_EQUAL_STRING(want, out);
+}
+
+void test_encode_envelope_clamps_dropped_and_always_carries_battery(void)
+{
+    uint8_t stream[16] = { 0 };
+    char out[256];
+    size_t n = sync_encode_envelope(stream, 100001, 4900, true, NULL, 0, out, sizeof(out));
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_TRUE(strstr(out, "\"dropped\":100000") != NULL); // server cap
+    TEST_ASSERT_TRUE(strstr(out, "\"battery_mv\":4900") != NULL); // empty batch:
+    TEST_ASSERT_TRUE(strstr(out, "\"low_battery\":true") != NULL); // heartbeat
+    TEST_ASSERT_TRUE(strstr(out, "\"events\":[]") != NULL);
 }
 
 // --- session ------------------------------------------------------------
@@ -251,9 +296,9 @@ void test_session_allow_list_200_replaces_cache(void)
     size_t n = 0, etag_len = 0;
     TEST_ASSERT_EQUAL(STORE_OK,
                       store_allow_list_read(cards, 4, &n, etag, sizeof(etag), &etag_len));
-    TEST_ASSERT_EQUAL_size_t(1, n);
+    TEST_ASSERT_EQUAL_size_t(3, n); // the fixture's three card shapes
     TEST_ASSERT_EQUAL_MEMORY("\"etag-1\"", etag, 8);
-    TEST_ASSERT_EQUAL_STRING("/v1/door/terminal/allow-list", sync_host_last_request.path);
+    TEST_ASSERT_EQUAL_STRING("/v1/door/terminal/allow-list", sync_host_last_get.path);
 }
 
 void test_session_304_keeps_cache_and_sends_etag(void)
@@ -262,7 +307,7 @@ void test_session_304_keeps_cache_and_sends_etag(void)
     sync_host_enqueue(304, NULL, NULL, NULL);
     sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
     TEST_ASSERT_TRUE(sync_session_run());
-    TEST_ASSERT_EQUAL_STRING("\"old-etag\"", sync_host_last_request.if_none_match);
+    TEST_ASSERT_EQUAL_STRING("\"old-etag\"", sync_host_last_get.if_none_match);
     store_card_t cards[4];
     char etag[STORE_ETAG_MAX];
     size_t n = 0, etag_len = 0;
@@ -271,11 +316,20 @@ void test_session_304_keeps_cache_and_sends_etag(void)
     TEST_ASSERT_EQUAL_size_t(1, n); // the cached list is untouched
 }
 
-void test_session_no_events_skips_post(void)
+void test_session_heartbeat_battery_without_events(void)
 {
+    // The envelope is sent EVERY session — an empty ring still reports the
+    // measured battery so the server's terminal TTL (150 min) and battery
+    // badge stay fresh (E2E review 2026-10-28, firmware item 8).
+    sync_host_set_battery(4900, true);
     sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
     TEST_ASSERT_TRUE(sync_session_run());
-    TEST_ASSERT_EQUAL_STRING("GET", sync_host_last_request.method); // no POST ran
+    TEST_ASSERT_EQUAL_STRING("POST", sync_host_last_request.method);
+    TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"battery_mv\":4900") != NULL);
+    TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"low_battery\":true") != NULL);
+    TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"events\":[]") != NULL);
+    TEST_ASSERT_EQUAL_INT(1, sync_host_post_count);
 }
 
 void test_session_uploads_batch_and_acks(void)
@@ -288,9 +342,11 @@ void test_session_uploads_batch_and_acks(void)
     }
     sync_host_enqueue(304, NULL, NULL, NULL);
     sync_host_enqueue(200, "{\"acked_through\":2,\"rejected\":[2]}", NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":3,\"rejected\":[]}", NULL, NULL);
     TEST_ASSERT_TRUE(sync_session_run());
     TEST_ASSERT_EQUAL_STRING("POST", sync_host_last_request.method);
     TEST_ASSERT_EQUAL_STRING("test-token", sync_host_last_request.token);
+    TEST_ASSERT_EQUAL_INT(2, sync_host_post_count); // the drain loop's 2 rounds
     // Envelope carried the batch: the stream UUID this device generated,
     // 3 events, dropped 0.
     uint8_t stream[16];
@@ -308,11 +364,10 @@ void test_session_uploads_batch_and_acks(void)
     TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"dropped\":0") != NULL);
     TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"seq\":3") != NULL);
     // acked_through 2 deletes seqs 1 and 2 (2 was rejected — same fate);
-    // seq 3 stays queued.
+    // round 2 uploads seq 3 and drains the ring.
     store_event_t out[STORE_BATCH_MAX];
     size_t n = store_event_batch(out, 10);
-    TEST_ASSERT_EQUAL_size_t(1, n);
-    TEST_ASSERT_EQUAL_UINT32(3, out[0].seq);
+    TEST_ASSERT_EQUAL_size_t(0, n);
 }
 
 void test_session_reports_dropped_and_acks_it(void)
@@ -325,8 +380,11 @@ void test_session_reports_dropped_and_acks_it(void)
     }
     sync_host_enqueue(304, NULL, NULL, NULL);
     sync_host_enqueue(200, "{\"acked_through\":64512,\"rejected\":[]}", NULL, NULL);
-    TEST_ASSERT_TRUE(sync_session_run());
-    TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"dropped\":2") != NULL);
+    // Round 0 uploads the first 100 and acks the drops; the drain loop then
+    // wants round 2 for the remaining ~64k events, the script is spent and
+    // the session ends false — the ring keeps the rest for the next session.
+    TEST_ASSERT_FALSE(sync_session_run());
+    TEST_ASSERT_TRUE(strstr(sync_host_first_post.body, "\"dropped\":2") != NULL);
     TEST_ASSERT_EQUAL_UINT32(0, store_dropped_count()); // cleared only after the 200
 }
 
@@ -380,7 +438,7 @@ void test_session_clamps_ack_to_the_batch(void)
     }
     sync_host_enqueue(304, NULL, NULL, NULL);
     sync_host_enqueue(200, "{\"acked_through\":4294967295,\"rejected\":[]}", NULL, NULL);
-    TEST_ASSERT_TRUE(sync_session_run());
+    TEST_ASSERT_FALSE(sync_session_run()); // round 2 has no script left
     // A hostile/buggy acked_through must not delete the unqueued 50.
     store_event_t out[STORE_BATCH_MAX];
     size_t n = store_event_batch(out, 10);
@@ -419,6 +477,7 @@ void test_session_rebases_every_session(void)
     // session, not just the first.
     clock_host_set_epoch(1792742462ULL);
     sync_host_enqueue(200, "{\"cards\":[]}", NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
     TEST_ASSERT_TRUE(sync_session_run());
     uint64_t epoch;
     bool synced;
@@ -429,6 +488,7 @@ void test_session_rebases_every_session(void)
     // stale — the SNTP time must win.
     clock_host_set_epoch(1792742462ULL + 600);
     sync_host_enqueue(200, "{\"cards\":[]}", NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
     TEST_ASSERT_TRUE(sync_session_run());
     clock_stamp(clock_boot_id(), clock_uptime_us(), &epoch, &synced);
     TEST_ASSERT_EQUAL_UINT64(1792742462ULL + 600, epoch);
@@ -476,6 +536,7 @@ void test_session_uses_date_header_when_unsynced(void)
     // SNTP did not converge in this session; the response Date header is the
     // fallback (§2.4) — later events stamp synced from it.
     sync_host_enqueue(200, "{\"cards\":[]}", NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
     TEST_ASSERT_TRUE(sync_session_run());
     TEST_ASSERT_TRUE(clock_synced());
     uint64_t epoch;
@@ -483,6 +544,70 @@ void test_session_uses_date_header_when_unsynced(void)
     clock_stamp(clock_boot_id(), clock_uptime_us(), &epoch, &synced);
     TEST_ASSERT_TRUE(synced);
     TEST_ASSERT_EQUAL_UINT64(1792742462ULL, epoch);
+}
+
+void test_session_drains_ring_in_batches(void)
+{
+    // ADR §2.4 / firmware item 6: the session DRAINS the ring — batches of
+    // ≤100, oldest first — until empty, not one batch per session.
+    uint8_t payload[sizeof(sync_event_t)];
+    sync_event_t ev = fixture_event();
+    memcpy(payload, &ev, sizeof(ev));
+    for (uint32_t i = 0; i < 250; i++) {
+        TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL));
+    }
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":100,\"rejected\":[]}", NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":200,\"rejected\":[]}", NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":250,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    TEST_ASSERT_EQUAL_INT(3, sync_host_post_count); // 100 + 100 + 50
+    store_event_t out[STORE_BATCH_MAX];
+    TEST_ASSERT_EQUAL_size_t(0, store_event_batch(out, STORE_BATCH_MAX));
+}
+
+void test_session_stops_when_round_makes_no_progress(void)
+{
+    // 200 but acked_through 0 with events still queued: re-sending the same
+    // batch inside the session would only hammer the server — one POST,
+    // then back off to the next session (the ring keeps everything).
+    uint8_t payload[sizeof(sync_event_t)];
+    sync_event_t ev = fixture_event();
+    memcpy(payload, &ev, sizeof(ev));
+    TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL));
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_FALSE(sync_session_run());
+    TEST_ASSERT_EQUAL_INT(1, sync_host_post_count);
+    store_event_t out[STORE_BATCH_MAX];
+    TEST_ASSERT_EQUAL_size_t(1, store_event_batch(out, STORE_BATCH_MAX));
+}
+
+void test_session_etag_round_trips_byte_exact(void)
+{
+    // The server ETag is a quoted 64-hex digest (66 bytes) — it must fit
+    // STORE_ETAG_MAX and come back byte-exact in If-None-Match, or every
+    // poll is a 200 instead of a 304 (firmware item 5).
+    char etag66[80];
+    etag66[0] = '"';
+    for (int i = 0; i < 64; i++) {
+        etag66[1 + i] = "0123456789abcdef"[i % 16];
+    }
+    etag66[65] = '"';
+    etag66[66] = '\0';
+    store_card_t c = { .uid_len = 4, .uid = { 0x11 } };
+    TEST_ASSERT_EQUAL(STORE_OK, store_allow_list_replace(&c, 1, etag66, 66));
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    TEST_ASSERT_EQUAL_STRING(etag66, sync_host_last_get.if_none_match);
+    // and the stored copy survives the longer value intact
+    char back[STORE_ETAG_MAX];
+    size_t n = 0, etag_len = 0;
+    TEST_ASSERT_EQUAL(STORE_OK,
+                      store_allow_list_read(&c, 1, &n, back, sizeof(back), &etag_len));
+    TEST_ASSERT_EQUAL_size_t(66, etag_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(etag66, back, 66);
 }
 
 // --- backoff ------------------------------------------------------------
@@ -510,6 +635,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_decode_allow_list_fixture);
+    RUN_TEST(test_decode_allow_list_256_cards_fit_resp_cap);
     RUN_TEST(test_decode_allow_list_unknown_fields_tolerated);
     RUN_TEST(test_decode_allow_list_rejects_malformed);
     RUN_TEST(test_decode_events_response_fixture);
@@ -517,9 +643,10 @@ int main(void)
     RUN_TEST(test_encode_event_matches_fixture_fields);
     RUN_TEST(test_encode_event_unsynced_and_denied_out);
     RUN_TEST(test_encode_envelope_matches_fixture);
+    RUN_TEST(test_encode_envelope_clamps_dropped_and_always_carries_battery);
     RUN_TEST(test_session_allow_list_200_replaces_cache);
     RUN_TEST(test_session_304_keeps_cache_and_sends_etag);
-    RUN_TEST(test_session_no_events_skips_post);
+    RUN_TEST(test_session_heartbeat_battery_without_events);
     RUN_TEST(test_session_uploads_batch_and_acks);
     RUN_TEST(test_session_reports_dropped_and_acks_it);
     RUN_TEST(test_session_failed_post_keeps_batch_and_dropped);
@@ -532,6 +659,9 @@ int main(void)
     RUN_TEST(test_session_unprovisioned_skips_everything);
     RUN_TEST(test_session_401_keeps_events_queued);
     RUN_TEST(test_session_uses_date_header_when_unsynced);
+    RUN_TEST(test_session_drains_ring_in_batches);
+    RUN_TEST(test_session_stops_when_round_makes_no_progress);
+    RUN_TEST(test_session_etag_round_trips_byte_exact);
     RUN_TEST(test_next_delay_interval_when_clean);
     RUN_TEST(test_next_delay_backoff_grows_and_caps);
     return UNITY_END();
