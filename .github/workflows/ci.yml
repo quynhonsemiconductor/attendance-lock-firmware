@@ -91,6 +91,9 @@ jobs:
           if grep -qx 'CONFIG_SECURE_BOOT_ALLOW_JTAG=y' "$cfg"; then
             echo "::error::prod sdkconfig re-enables JTAG (CONFIG_SECURE_BOOT_ALLOW_JTAG)"; missing=1
           fi
+          if grep -qx 'CONFIG_PROVISION_ALLOW_HTTP=y' "$cfg"; then
+            echo "::error::prod sdkconfig allows plain-http provisioning URLs (CONFIG_PROVISION_ALLOW_HTTP)"; missing=1
+          fi
           exit $missing
 
       # Dev must stay soft: the profile diff against prod is the point.
@@ -106,6 +109,11 @@ jobs:
               echo "::error::dev sdkconfig gained $opt"; bad=1
             fi
           done
+          # The one deliberate dev-only extra: plain-http provisioning URLs
+          # for the bench sync test (BENCH-TEST.md §7). Present in dev, unset
+          # in prod (asserted above).
+          grep -qx 'CONFIG_PROVISION_ALLOW_HTTP=y' "$cfg" \
+            || { echo "::error::dev sdkconfig lost CONFIG_PROVISION_ALLOW_HTTP=y"; bad=1; }
           exit $bad
 
       - name: Size report

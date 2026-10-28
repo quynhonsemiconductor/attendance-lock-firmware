@@ -1,0 +1,12 @@
+menu "Provision"
+
+config PROVISION_ALLOW_HTTP
+    bool "Allow plain-http base URLs (dev bench only)"
+    default n
+    help
+        When set, the provisioning console accepts an http:// base URL so
+        the board can sync against a local opshub without TLS
+        (docs/BENCH-TEST.md). Dev profile only: the prod build keeps this
+        unset and rejects anything but https:// (asserted in CI).
+
+endmenu

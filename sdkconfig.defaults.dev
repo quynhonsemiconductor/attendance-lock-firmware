@@ -5,3 +5,8 @@
 CONFIG_SECURE_BOOT=n
 CONFIG_SECURE_FLASH_ENC_ENABLED=n
 CONFIG_NVS_ENCRYPTION=n
+
+# Bench-only: the provisioning console accepts plain-http base URLs so the
+# board can sync against a local opshub (docs/BENCH-TEST.md §7). The prod
+# profile keeps this unset — https:// only (asserted in CI).
+CONFIG_PROVISION_ALLOW_HTTP=y
