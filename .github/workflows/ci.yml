@@ -65,16 +65,23 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: idf-ccache-${{ matrix.profile }}-${{ hashFiles('sdkconfig.defaults*', 'components/**/CMakeLists.txt', 'main/**/CMakeLists.txt') }}
+          # Exact key per RUN: actions/cache saves nothing when an exact key
+          # already exists, so a stable key would freeze the cache at whatever
+          # the first build produced; per-sha keys with a profile-prefix
+          # restore keep every run saving, and every later run loading the
+          # newest entry for its profile.
+          key: idf-ccache-${{ matrix.profile }}-${{ github.sha }}
           restore-keys: |
             idf-ccache-${{ matrix.profile }}-
-      - name: ccache stats (after)
-        if: always()
-        run: ccache --show-stats || ccache -s
 
       - name: Build (${{ matrix.profile }} profile)
         env:
           PROFILE: ${{ matrix.profile }}
+          # Explicit rather than relying on the image's default: the idf image
+          # ships ccache and ESP-IDF picks it up when found, but a future image
+          # that drops it would silently degrade to full builds while the cache
+          # step kept reporting green.
+          IDF_CCACHE_ENABLE: '1'
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh"
@@ -86,6 +93,10 @@ jobs:
                  -DSDKCONFIG="build-$PROFILE/sdkconfig" \
                  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.$PROFILE" \
                  build
+
+      - name: ccache stats (after the build)
+        if: always()
+        run: ccache --show-stats || ccache -s
 
       # The prod build must prove its hardening, not just compile (ADR §2.8).
       # grep over the RESOLVED sdkconfig: catches a typo'd Kconfig symbol that
