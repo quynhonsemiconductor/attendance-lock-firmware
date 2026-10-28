@@ -39,6 +39,15 @@ jobs:
     defaults:
       run:
         shell: bash
+    # ccache's default dir is under $HOME, and the runner maps HOME into the
+    # container as /github/home — every step AGREES on the dir only while
+    # nothing in the chain disagrees. Measured: with the default dir the second
+    # run restored 41 MB and still hit 0/2841, so the build was reading and
+    # writing somewhere the cache step was not. Pinning the dir to the workspace
+    # (a volume the whole job shares, host and container alike) removes the
+    # guesswork; the cache step archives the same literal path.
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         # Builds an image; never pushes a git ref.
@@ -62,9 +71,10 @@ jobs:
           set -euo pipefail
           command -v ccache
           ccache --version | head -1
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          [ "$(ccache -k cache_dir)" = "$CCACHE_DIR" ]
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          path: ~/.cache/ccache
           # Exact key per RUN: actions/cache saves nothing when an exact key
           # already exists, so a stable key would freeze the cache at whatever
           # the first build produced; per-sha keys with a profile-prefix
@@ -73,6 +83,12 @@ jobs:
           key: idf-ccache-${{ matrix.profile }}-${{ github.sha }}
           restore-keys: |
             idf-ccache-${{ matrix.profile }}-
+          path: ${{ github.workspace }}/.ccache
+
+      # Zero the counters so the stats printed after the build are THIS run's
+      # hit rate, not the accumulated history of every run that touched the dir.
+      - name: ccache stats reset
+        run: ccache -z
 
       - name: Build (${{ matrix.profile }} profile)
         env:
