@@ -151,6 +151,48 @@ void test_empty_line_is_silent_and_crlf_tolerated(void)
     TEST_ASSERT_NOT_NULL(strstr(send("  status  \r\n"), "url:"));
 }
 
+void test_input_masking_covers_write_only_values(void)
+{
+    // from the completed prefix on, the echo masks
+    TEST_ASSERT_TRUE(provision_input_masked("set token "));
+    TEST_ASSERT_TRUE(provision_input_masked("set token s3cr"));
+    TEST_ASSERT_TRUE(provision_input_masked("set wifi pass "));
+    TEST_ASSERT_TRUE(provision_input_masked("set wifi pass hunter2"));
+    TEST_ASSERT_TRUE(provision_input_masked("  set token x")); // leading blanks
+    // printable values and everything else echo normally
+    TEST_ASSERT_FALSE(provision_input_masked("set tok"));
+    TEST_ASSERT_FALSE(provision_input_masked("set tokenx a"));
+    TEST_ASSERT_FALSE(provision_input_masked("set url https://h"));
+    TEST_ASSERT_FALSE(provision_input_masked("set wifi ssid Net"));
+    TEST_ASSERT_FALSE(provision_input_masked("status"));
+    TEST_ASSERT_FALSE(provision_input_masked(""));
+}
+
+void test_set_url_is_scheme_host_port_only(void)
+{
+    provision_host_set_allow_http(true);
+    const char *ok[] = { "https://host", "https://host:3001",
+                         "http://192.168.1.10:3001", "https://xn--e1afmkfd.xn--p1ai" };
+    char line[160];
+    for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
+        snprintf(line, sizeof(line), "set url %s", ok[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(send(line), "ok"), ok[i]);
+    }
+    const char *bad[] = {
+        "https://host/path",   "https://host?q=1",     "https://host#frag",
+        "https://user@host",   "https://user:pw@host", "https://host:",
+        "https://:3001",       "https://host:0",       "https://host:65536",
+        "https://host:99999",  "https://host:abc",     "https://host:30x01",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        provision_host_reset(); // each case starts from an unset url
+        provision_host_set_allow_http(true);
+        snprintf(line, sizeof(line), "set url %s", bad[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(send(line), "error"), bad[i]);
+        TEST_ASSERT_NULL(provision_host_get("url")); // nothing stored
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -164,5 +206,7 @@ int main(void)
     RUN_TEST(test_provisioned_requires_url_and_token);
     RUN_TEST(test_unknown_and_forbidden_commands);
     RUN_TEST(test_empty_line_is_silent_and_crlf_tolerated);
+    RUN_TEST(test_input_masking_covers_write_only_values);
+    RUN_TEST(test_set_url_is_scheme_host_port_only);
     return UNITY_END();
 }

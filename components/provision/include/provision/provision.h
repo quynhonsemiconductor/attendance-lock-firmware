@@ -12,6 +12,10 @@ void provision_init(void);
 // True when a base URL and token are stored (encrypted NVS, prod profile).
 bool provisioned(void);
 
+// True when the line being typed has reached a write-only value ("set
+// token …" / "set wifi pass …"): the UART echo masks those inputs with '*'.
+bool provision_input_masked(const char *line);
+
 // Handle one console line ("set url …", "set token …", "set wifi ssid …",
 // "set wifi pass …", "status") and write the reply to out: nul-terminated,
 // at most out_cap bytes, one line per message. Platform-free — the UART

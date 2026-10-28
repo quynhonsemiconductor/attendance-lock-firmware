@@ -79,24 +79,15 @@ bool provision_port_has_str(const char *key)
     if (!nvs_ready()) {
         return false;
     }
-    // Entry iteration reads metadata only: the token and the Wi-Fi pass are
-    // never read back (§2.8). IDF v6 API: the iterator comes back by
-    // out-param and nvs_entry_next() clears it at the end of the iteration.
-    bool found = false;
-    nvs_iterator_t it = NULL;
-    esp_err_t e = nvs_entry_find("nvs", NS, NVS_TYPE_STR, &it);
-    while (e == ESP_OK) {
-        nvs_entry_info_t info;
-        nvs_entry_info(it, &info);
-        if (strcmp(info.key, key) == 0) {
-            found = true;
-            break;
-        }
-        e = nvs_entry_next(&it);
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
+        return false; // namespace absent = not provisioned yet
     }
-    if (it != NULL) {
-        nvs_release_iterator(it);
-    }
+    // nvs_find_key reads metadata only: the token and the Wi-Fi pass are
+    // never read back (§2.8).
+    nvs_type_t type;
+    bool found = nvs_find_key(h, key, &type) == ESP_OK && type == NVS_TYPE_STR;
+    nvs_close(h);
     return found;
 }
 
@@ -121,6 +112,7 @@ static size_t read_line(char *buf, size_t cap)
     for (;;) {
         int c = fgetc(stdin);
         if (c == EOF) {
+            clearerr(stdin); // EOF on a VFS read just means "nothing yet"
             vTaskDelay(pdMS_TO_TICKS(20)); // between characters: yield
             continue;
         }
@@ -140,12 +132,26 @@ static size_t read_line(char *buf, size_t cap)
         }
         if (c >= 0x20 && c < 0x7F && n + 1 < cap) {
             buf[n++] = (char)c;
-            putchar(c); // local echo: monitor does not echo
+            buf[n] = '\0';
+            // Local echo (monitor does not echo) — but a line that reached a
+            // write-only value echoes '*' instead, so the monitor and the
+            // logs BENCH-TEST asks to save never show the secret.
+            putchar(provision_input_masked(buf) ? '*' : c);
         }
     }
     buf[n] = '\0';
     fflush(stdout);
     return n;
+}
+
+// Dead-store-proof wipe (volatile): the line held a secret value; memset
+// can be elided, this cannot.
+static void zeroize(void *p, size_t n)
+{
+    volatile unsigned char *v = p;
+    while (n--) {
+        *v++ = 0;
+    }
 }
 
 static void console_task(void *arg)
@@ -159,6 +165,8 @@ static void console_task(void *arg)
         read_line(line, sizeof(line));
         provision_handle_line(line, reply, sizeof(reply));
         fputs(reply, stdout);
+        zeroize(line, sizeof(line)); // the line may have held a secret value
+        zeroize(reply, sizeof(reply));
     }
 }
 

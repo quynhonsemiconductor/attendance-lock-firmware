@@ -29,6 +29,16 @@
     "usage: set url <url> | set token <token> | set wifi ssid <ssid> |\n" \
     "       set wifi pass <pass> | status\n"
 
+// Dead-store-proof wipe (volatile): the line buffer held a secret value;
+// memset can be elided, this cannot.
+static void zeroize(void *p, size_t n)
+{
+    volatile unsigned char *v = p;
+    while (n--) {
+        *v++ = 0;
+    }
+}
+
 static void appendf(char *out, size_t out_cap, size_t *n, const char *fmt, ...)
 {
     if (*n >= out_cap) {
@@ -78,16 +88,48 @@ static char *split(char **s)
     return head;
 }
 
-// https://host[:port] (no trailing slash; http:// only in the dev build).
+// scheme://host[:port] EXACTLY (http:// only in the dev build): the sync
+// client appends its own paths, so a base URL that carries a path, query,
+// fragment or userinfo separator is a mistake, not a feature.
 static bool valid_url(const char *v)
 {
     size_t n = strlen(v);
-    if (n == 0 || n > URL_MAX || v[n - 1] == '/' || strpbrk(v, " \t") != NULL) {
+    if (n == 0 || n > URL_MAX || strpbrk(v, " \t") != NULL) {
         return false;
     }
-    bool https = strncmp(v, "https://", 8) == 0 && n > 8;
-    bool http = strncmp(v, "http://", 7) == 0 && n > 7;
-    return https || (http && provision_port_allow_http());
+    const char *host = NULL;
+    if (strncmp(v, "https://", 8) == 0) {
+        host = v + 8;
+    } else if (provision_port_allow_http() && strncmp(v, "http://", 7) == 0) {
+        host = v + 7;
+    }
+    if (host == NULL || host[0] == '\0') {
+        return false;
+    }
+    if (strpbrk(host, "/?#@") != NULL) { // path / query / fragment / userinfo
+        return false;
+    }
+    const char *colon = strchr(host, ':');
+    if (colon == host) {
+        return false; // ":port" with no host
+    }
+    if (colon != NULL) {
+        const char *port = colon + 1;
+        if (port[0] == '\0' || strlen(port) > 5) {
+            return false;
+        }
+        long pv = 0;
+        for (const char *p = port; *p != '\0'; p++) {
+            if (*p < '0' || *p > '9') {
+                return false;
+            }
+            pv = pv * 10 + (*p - '0');
+        }
+        if (pv < 1 || pv > 65535) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void cmd_set(char *args, char *out, size_t out_cap, size_t *n)
@@ -102,8 +144,8 @@ static void cmd_set(char *args, char *out, size_t out_cap, size_t *n)
     if (strcmp(key, "url") == 0) {
         if (!valid_url(args)) {
             appendf(out, out_cap, n,
-                    "error: url must be https://host[:port] without a trailing slash "
-                    "(http:// is dev-build only)\n");
+                    "error: url must be scheme://host[:port] with no path, query or "
+                    "fragment (https only; http:// is dev-build only)\n");
             return;
         }
         if (!provision_port_set_str(KEY_URL, args)) {
@@ -172,29 +214,46 @@ static void cmd_status(char *out, size_t out_cap, size_t *n)
     appendf(out, out_cap, n, "provisioned: %s\n", provisioned() ? "yes" : "no");
 }
 
+// True when the line being typed has reached a write-only value: from
+// "set token " / "set wifi pass " on, the console echoes '*' so the monitor
+// (and the logs BENCH-TEST asks to save) never shows the secret.
+bool provision_input_masked(const char *line)
+{
+    static const char *const masked[] = { "set token ", "set wifi pass " };
+    while (line[0] == ' ' || line[0] == '\t') {
+        line++;
+    }
+    for (size_t i = 0; i < sizeof(masked) / sizeof(masked[0]); i++) {
+        if (strncmp(line, masked[i], strlen(masked[i])) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void provision_handle_line(const char *line, char *out, size_t out_cap)
 {
     size_t n = 0;
     out[0] = '\0';
     char buf[256];
-    if (strlen(line) >= sizeof(buf)) {
-        appendf(out, out_cap, &n, "error: line too long\n");
-        return;
-    }
-    snprintf(buf, sizeof(buf), "%s", line);
-    char *s = buf;
-    trim(&s);
-    if (s[0] == '\0') {
-        return; // empty line: just prompt again
-    }
-    char *cmd = split(&s);
-    if (strcmp(cmd, "set") == 0) {
-        cmd_set(s, out, out_cap, &n);
-    } else if (strcmp(cmd, "status") == 0 && s[0] == '\0') {
-        cmd_status(out, out_cap, &n);
+    if (strlen(line) < sizeof(buf)) {
+        snprintf(buf, sizeof(buf), "%s", line);
+        char *s = buf;
+        trim(&s);
+        if (s[0] != '\0') {
+            char *cmd = split(&s);
+            if (strcmp(cmd, "set") == 0) {
+                cmd_set(s, out, out_cap, &n);
+            } else if (strcmp(cmd, "status") == 0 && s[0] == '\0') {
+                cmd_status(out, out_cap, &n);
+            } else {
+                appendf(out, out_cap, &n, "error: unknown command\n" USAGE);
+            }
+        } // else: empty line — just prompt again
     } else {
-        appendf(out, out_cap, &n, "error: unknown command\n" USAGE);
+        appendf(out, out_cap, &n, "error: line too long\n");
     }
+    zeroize(buf, sizeof(buf)); // the line may have held a secret value
 }
 
 bool provisioned(void)

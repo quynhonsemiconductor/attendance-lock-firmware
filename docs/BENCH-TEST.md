@@ -87,8 +87,19 @@ door> status
 
 `set url` accepts `http://` only in the dev build (no secure boot / flash
 encryption, asserted in CI); the prod build rejects anything but `https://`.
+The url must be a bare `scheme://host[:port]` — no path, query or fragment.
+The console echoes `*` while a token or Wi-Fi pass is being typed, so the
+secret never shows on the monitor or in the saved log.
 Commands not listed above do not exist — there is no unlock, card or
 test-output command. (Row 15 is read distance and does not need provisioning.)
+
+Moving the terminal to another server (re-provisioning): register on the
+new server first, then on the console set the **token before the url**. A
+sync session that runs between the two writes fails 401 and keeps its queue
+(events are retried with backoff, nothing is lost), and finishing with the
+url means the new server's first contact already carries the matching
+token — its terminal health starts clean instead of logging bad-token
+attempts.
 
 ## 5. Bench checklist
 
