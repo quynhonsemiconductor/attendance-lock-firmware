@@ -17,6 +17,11 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 
+// The duplicated esp_err_t values in store_port.h must match the IDF ones
+// (the host build has no headers to compare against).
+_Static_assert(ESP_ERR_NVS_NOT_FOUND == STORE_PORT_ESP_ERR_NVS_NOT_FOUND,
+               "store_port.h esp_err_t constants drifted from nvs.h");
+
 static const char *TAG = "store";
 
 #define NS "store"
@@ -56,7 +61,7 @@ void store_port_unlock(void)
 static bool nvs_ready(void)
 {
     static bool done;
-    static bool logged;
+    static int logged_err; // 0 = nothing logged yet; no error is 0
     if (done) {
         return true;
     }
@@ -68,9 +73,9 @@ static bool nvs_ready(void)
     // NEVER wipe: the allow-list cache and the stream UUID live in this
     // partition, and wiping would change the stream identity. Only an
     // explicit, logged maintenance action may erase NVS.
-    if (!logged) { // called on every access: complain once, not per access
+    if (e != logged_err) { // every access retries: log per CODE, not per call
         ESP_LOGE(TAG, "nvs unusable (%s) — refusing to wipe", esp_err_to_name(e));
-        logged = true;
+        logged_err = e;
     }
     return false;
 }
@@ -132,14 +137,10 @@ static store_port_nvs_res_t open_ro(nvs_handle_t *h)
         return STORE_PORT_ERROR;
     }
     esp_err_t e = nvs_open(NS, NVS_READONLY, h);
-    if (e == ESP_OK) {
-        return STORE_PORT_FOUND;
+    if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "nvs_open(%s, ro) failed: %s", NS, esp_err_to_name(e));
     }
-    if (e == ESP_ERR_NVS_NOT_FOUND) {
-        return STORE_PORT_ABSENT; // namespace absent ⇒ key absent
-    }
-    ESP_LOGE(TAG, "nvs_open(%s, ro) failed: %s", NS, esp_err_to_name(e));
-    return STORE_PORT_ERROR;
+    return store_port_open_res(e); // shared mapping (also host-tested)
 }
 
 store_port_nvs_res_t store_port_nvs_get_u32(const char *key, uint32_t *v)

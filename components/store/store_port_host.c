@@ -34,9 +34,9 @@ static int nents;
 
 // Namespace emulation: real NVS has no "store" namespace until the first
 // READWRITE open creates it, so a getter on a blank chip hits
-// nvs_open(READONLY) = ESP_ERR_NVS_NOT_FOUND. The ESP port maps that to
-// ABSENT (store_port_esp.c open_ro); this gate reproduces the same state —
-// absent namespace ⇒ every key absent, never ERROR.
+// nvs_open(READONLY) = ESP_ERR_NVS_NOT_FOUND. The gate below routes that
+// through the SAME mapping the ESP port uses (store_port_map.c), so the
+// host tests cover the device's mapping, not a lookalike.
 static bool ns_created;
 
 size_t store_port_flash_size(void)
@@ -185,7 +185,9 @@ bool store_port_nvs_set_blob(const char *key, const void *v, size_t len)
 store_port_nvs_res_t store_port_nvs_get_blob(const char *key, void *out, size_t *len)
 {
     if (!ns_created) {
-        return STORE_PORT_ABSENT; // namespace absent ⇒ key absent
+        // The simulated nvs_open(READONLY) fails NOT_FOUND, exactly like a
+        // blank chip; store_port_map.c turns it into ABSENT.
+        return store_port_open_res(STORE_PORT_ESP_ERR_NVS_NOT_FOUND);
     }
     ent_t *e = find(key);
     if (e == NULL) {
