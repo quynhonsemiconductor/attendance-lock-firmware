@@ -19,7 +19,7 @@
 static const char *TAG = "prov";
 
 #define NS "prov"
-#define LINE_MAX 256
+#define PROV_LINE_MAX 256
 #define REPLY_MAX 512
 
 static bool nvs_ready(void)
@@ -80,17 +80,24 @@ bool provision_port_has_str(const char *key)
         return false;
     }
     // Entry iteration reads metadata only: the token and the Wi-Fi pass are
-    // never read back (§2.8).
-    for (nvs_iterator_t it = nvs_entry_find("nvs", NS, NVS_TYPE_STR); it != NULL;
-         it = nvs_entry_next(it)) {
+    // never read back (§2.8). IDF v6 API: the iterator comes back by
+    // out-param and nvs_entry_next() clears it at the end of the iteration.
+    bool found = false;
+    nvs_iterator_t it = NULL;
+    esp_err_t e = nvs_entry_find("nvs", NS, NVS_TYPE_STR, &it);
+    while (e == ESP_OK) {
         nvs_entry_info_t info;
         nvs_entry_info(it, &info);
         if (strcmp(info.key, key) == 0) {
-            nvs_release_iterator(it);
-            return true;
+            found = true;
+            break;
         }
+        e = nvs_entry_next(&it);
     }
-    return false;
+    if (it != NULL) {
+        nvs_release_iterator(it);
+    }
+    return found;
 }
 
 bool provision_port_allow_http(void)
@@ -144,7 +151,7 @@ static size_t read_line(char *buf, size_t cap)
 static void console_task(void *arg)
 {
     (void)arg;
-    static char line[LINE_MAX];   // file-scope-sized buffers, off the stack
+    static char line[PROV_LINE_MAX]; // file-scope-sized buffers, off the stack
     static char reply[REPLY_MAX]; // (matches the other components)
     for (;;) {
         fputs("\rdoor> ", stdout);
