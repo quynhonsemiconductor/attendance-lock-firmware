@@ -58,32 +58,69 @@ static const char *TAG = "rc522";
 
 static spi_device_handle_t s_spi;
 
+// One SPI frame = one CS assertion. Without DMA the host moves at most its
+// 64-byte hardware buffer per transaction. Polling transmit: a frame is a
+// few µs at 4 MHz, far less than the interrupt + task switch of
+// spi_device_transmit — which dominated each poll at the 10 MHz DFS floor.
+#define SPI_FRAME_MAX 64
+#define ADDR_W(reg) ((uint8_t)(((reg) << 1) & 0x7E))
+#define ADDR_R(reg) ((uint8_t)(ADDR_W(reg) | 0x80))
+
+static void spi_frame(const rc522_conf_t *conf, const uint8_t *tx, uint8_t *rx, size_t len)
+{
+    spi_transaction_t t = { .length = len * 8, .tx_buffer = tx, .rx_buffer = rx };
+    gpio_set_level(conf->cs_gpio, 0);
+    (void)spi_device_polling_transmit(s_spi, &t);
+    gpio_set_level(conf->cs_gpio, 1);
+}
+
 // The MFRC522 SPI protocol: byte0 = reg<<1 | R/W (0x80 = read), MSB first.
+// A write frame is one address then data bytes that ALL land in that one
+// register (datasheet §8.1.2.2) — a burst only makes sense for FIFODataReg.
+static void write_burst(const rc522_conf_t *conf, uint8_t reg, const uint8_t *data, size_t len)
+{
+    uint8_t tx[SPI_FRAME_MAX];
+    while (len > 0) {
+        size_t chunk = len < SPI_FRAME_MAX - 1 ? len : SPI_FRAME_MAX - 1;
+        tx[0] = ADDR_W(reg);
+        memcpy(&tx[1], data, chunk);
+        spi_frame(conf, tx, NULL, chunk + 1);
+        data += chunk;
+        len -= chunk;
+    }
+}
+
 static void write_reg(const rc522_conf_t *conf, uint8_t reg, uint8_t val)
 {
-    uint8_t tx[2] = { (uint8_t)((reg << 1) & 0x7E), val };
-    spi_transaction_t t = { .length = 16, .tx_buffer = tx };
-    gpio_set_level(conf->cs_gpio, 0);
-    (void)spi_device_transmit(s_spi, &t);
-    gpio_set_level(conf->cs_gpio, 1);
+    write_burst(conf, reg, &val, 1);
+}
+
+// A read frame may name a different register in every byte: MOSI carries
+// the next address while MISO returns the previous one's value, closed by
+// a 0x00 (datasheet §8.1.2.1). n reads cost one frame instead of n.
+static void read_regs(const rc522_conf_t *conf, const uint8_t *regs, uint8_t *vals, size_t n)
+{
+    uint8_t tx[SPI_FRAME_MAX];
+    uint8_t rx[SPI_FRAME_MAX];
+    while (n > 0) {
+        size_t chunk = n < SPI_FRAME_MAX - 1 ? n : SPI_FRAME_MAX - 1;
+        for (size_t i = 0; i < chunk; i++) {
+            tx[i] = ADDR_R(regs[i]);
+        }
+        tx[chunk] = 0x00;
+        spi_frame(conf, tx, rx, chunk + 1);
+        memcpy(vals, &rx[1], chunk);
+        regs += chunk;
+        vals += chunk;
+        n -= chunk;
+    }
 }
 
 static uint8_t read_reg(const rc522_conf_t *conf, uint8_t reg)
 {
-    uint8_t tx[2] = { (uint8_t)(((reg << 1) & 0x7E) | 0x80), 0 };
-    uint8_t rx[2] = { 0 };
-    spi_transaction_t t = { .length = 16, .tx_buffer = tx, .rx_buffer = rx };
-    gpio_set_level(conf->cs_gpio, 0);
-    (void)spi_device_transmit(s_spi, &t);
-    gpio_set_level(conf->cs_gpio, 1);
-    return rx[1];
-}
-
-static void write_fifo(const rc522_conf_t *conf, const uint8_t *data, size_t len)
-{
-    for (size_t i = 0; i < len; i++) {
-        write_reg(conf, REG_FIFO_DATA, data[i]);
-    }
+    uint8_t val;
+    read_regs(conf, &reg, &val, 1);
+    return val;
 }
 
 // The prototype's init recipe (its PCD_Init): soft reset, then the timer /
@@ -101,9 +138,11 @@ static void chip_init(const rc522_conf_t *conf)
     write_reg(conf, REG_T_RELOAD_MSB, 0x03);
     write_reg(conf, REG_TX_ASK, 0x40);
     write_reg(conf, REG_MODE, 0x3D);
-    write_reg(conf, REG_RF_CFG,
-              (uint8_t)((read_reg(conf, REG_RF_CFG) & 0x08) | 0x70)); // RxGain_max
-    write_reg(conf, REG_TX_CONTROL, (uint8_t)(read_reg(conf, REG_TX_CONTROL) & ~0x03));
+    static const uint8_t rmw_regs[2] = { REG_RF_CFG, REG_TX_CONTROL };
+    uint8_t rmw[2];
+    read_regs(conf, rmw_regs, rmw, 2);
+    write_reg(conf, REG_RF_CFG, (uint8_t)((rmw[0] & 0x08) | 0x70)); // RxGain_max
+    write_reg(conf, REG_TX_CONTROL, (uint8_t)(rmw[1] & ~0x03));
 }
 
 static void antenna_on(const rc522_conf_t *conf)
@@ -135,24 +174,27 @@ static xfer_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
     *rx_len = 0;
     write_reg(conf, REG_COM_IRQ, 0x7F); // clear every IRQ flag
     write_reg(conf, REG_FIFO_LEVEL, 0x80); // flush FIFO
-    write_fifo(conf, tx, tx_len);
+    write_burst(conf, REG_FIFO_DATA, tx, tx_len); // whole frame in one SPI burst
     write_reg(conf, REG_COMMAND, CMD_TRANSCEIVE);
     // StartSend is BitFramingReg bit 7, not a CommandReg bit: without it
     // Transceive waits forever and no REQA ever leaves the antenna.
     write_reg(conf, REG_BIT_FRAMING, (uint8_t)(bit_framing | 0x80));
 
+    // ComIrq + Error in one frame per spin.
+    static const uint8_t spin_regs[2] = { REG_COM_IRQ, REG_ERROR };
+    uint8_t spin[2];
     int64_t deadline_us = esp_timer_get_time() + 36000;
     bool got_rx = false;
     while (esp_timer_get_time() < deadline_us) {
-        uint8_t irq = read_reg(conf, REG_COM_IRQ);
-        if (irq & IRQ_RX) {
+        read_regs(conf, spin_regs, spin, 2);
+        if (spin[0] & IRQ_RX) {
             got_rx = true;
             break;
         }
-        if (irq & IRQ_TIMER) {
+        if (spin[0] & IRQ_TIMER) {
             return XFER_NONE;
         }
-        if (read_reg(conf, REG_ERROR) & ERR_FRAME) {
+        if (spin[1] & ERR_FRAME) {
             return XFER_NONE;
         }
     }
@@ -160,24 +202,32 @@ static xfer_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
         return XFER_NONE; // software bound hit: the FIFO still holds our own TX bytes
     }
     // RxIRq fires on a damaged frame too: the error flags decide. CRCErr
-    // latches only on CRC-on exchanges (select/halt).
-    uint8_t err = read_reg(conf, REG_ERROR);
+    // latches only on CRC-on exchanges (select/halt). Error + FIFO level in
+    // one frame, then the whole reply in one more.
+    static const uint8_t done_regs[2] = { REG_ERROR, REG_FIFO_LEVEL };
+    uint8_t done[2];
+    read_regs(conf, done_regs, done, 2);
+    uint8_t err = done[0];
     if (err & (ERR_FRAME | ERR_CRC)) {
         return XFER_NONE;
     }
-    uint8_t n = read_reg(conf, REG_FIFO_LEVEL);
+    uint8_t n = done[1];
     if (n > rx_cap) {
         n = (uint8_t)rx_cap;
     }
-    uint8_t rx_align = (uint8_t)((bit_framing >> 4) & 0x07);
-    for (uint8_t i = 0; i < n; i++) {
-        uint8_t b = read_reg(conf, REG_FIFO_DATA);
-        if (i == 0 && rx_align != 0) {
-            uint8_t mask = (uint8_t)(0xFF << rx_align);
-            b = (uint8_t)((rx[0] & ~mask) | (b & mask));
-        }
-        rx[i] = b;
+    uint8_t fifo_regs[SPI_FRAME_MAX - 1];
+    uint8_t fifo[SPI_FRAME_MAX - 1];
+    if (n > sizeof(fifo)) {
+        n = sizeof(fifo);
     }
+    memset(fifo_regs, REG_FIFO_DATA, n);
+    read_regs(conf, fifo_regs, fifo, n);
+    uint8_t rx_align = (uint8_t)((bit_framing >> 4) & 0x07);
+    if (n > 0 && rx_align != 0) {
+        uint8_t mask = (uint8_t)(0xFF << rx_align);
+        fifo[0] = (uint8_t)((rx[0] & ~mask) | (fifo[0] & mask));
+    }
+    memcpy(rx, fifo, n);
     *rx_len = n;
     return (err & ERR_COLL) ? XFER_COLLISION : XFER_OK;
 }
@@ -316,11 +366,13 @@ bool rc522_init(const rc522_conf_t *conf)
 // TPrescaler as the 0xA9 init wrote it; 0x00/0xFF on VersionReg = no reply.
 bool rc522_healthy(const rc522_conf_t *conf)
 {
-    uint8_t v = read_reg(conf, REG_VERSION);
-    if (v == 0x00 || v == 0xFF) {
+    static const uint8_t regs[2] = { REG_VERSION, REG_T_PRESCALER };
+    uint8_t v[2];
+    read_regs(conf, regs, v, 2);
+    if (v[0] == 0x00 || v[0] == 0xFF) {
         return false; // nothing on the bus
     }
-    return read_reg(conf, REG_T_PRESCALER) == 0xA9;
+    return v[1] == 0xA9;
 }
 
 // One poll cycle (battery/wake decisions 2026-10-25): wake from hard
