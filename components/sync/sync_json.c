@@ -104,38 +104,16 @@ size_t sync_encode_event(const sync_event_t *ev, uint32_t seq, char *out, size_t
     return e.ok ? e.len : 0;
 }
 
-bool sync_read_body(int (*read_fn)(char *buf, int len, void *ctx), void *ctx, char *resp,
-                    size_t cap, size_t *len_out)
-{
-    // cap-1: room for the NUL. More data after the buffer filled, or a read
-    // error, is a FAILURE — an oversized body must never arrive as a
-    // silently truncated 200 (a truncated allow-list would freeze
-    // revocations).
-    int total = 0;
-    int n;
-    while ((n = read_fn(resp + total, (int)(cap - 1 - total), ctx)) > 0) {
-        total += n;
-        if ((size_t)total >= cap - 1) {
-            char probe;
-            if (read_fn(&probe, 1, ctx) > 0) {
-                return false; // more data: truncated body
-            }
-            break;
-        }
-    }
-    if (n < 0) {
-        return false; // read error
-    }
-    resp[total] = '\0';
-    *len_out = (size_t)total;
-    return true;
-}
-
 size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
+                            uint16_t battery_mv, bool low_battery,
                             const store_event_t *events, size_t n_events, char *out, size_t cap)
 {
     if (stream == NULL || out == NULL || (events == NULL && n_events > 0)) {
         return 0;
+    }
+    if (dropped > SYNC_DROPPED_REPORT_MAX) {
+        dropped = SYNC_DROPPED_REPORT_MAX; // server-capped field: report the
+        // cap, keep the true count in the store
     }
     emit_t e = { .buf = out, .cap = cap, .len = 0, .ok = true };
     emit_str(&e, "{\"stream\":\"");
@@ -149,12 +127,12 @@ size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
     }
     emit_str(&e, "\",\"dropped\":");
     emit_u32(&e, dropped);
-    if (n_events > 0) {
-        const sync_event_t *last = (const sync_event_t *)events[n_events - 1].bytes;
-        emit_str(&e, ",\"battery_mv\":");
-        emit_u32(&e, last->battery_mv);
+    if (battery_mv != 0) { // 0 = no reading this session: omit BOTH fields —
+        // the server must not read an absent pack as 0 mV and alert
+        emit_str(&e, ",\"battery_mv\":"); // (round-2 review item 1)
+        emit_u32(&e, battery_mv);
         emit_str(&e, ",\"low_battery\":");
-        emit_str(&e, last->low_battery ? "true" : "false");
+        emit_str(&e, low_battery ? "true" : "false");
     }
     emit_str(&e, ",\"events\":[");
     for (size_t i = 0; i < n_events; i++) {
@@ -174,6 +152,34 @@ size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
         e.buf[e.len] = '\0';
     }
     return e.ok ? e.len : 0;
+}
+
+// --- response-body accumulator (round-2 review item 4) ------------------
+//
+// Bounded sink for streamed body chunks (the ESP port feeds it from
+// HTTP_EVENT_ON_DATA). Same rule as the host port: cap-1 usable bytes, and
+// once more data arrives than fits the accumulator latches overflow — an
+// oversized body must never arrive as a silently truncated 200.
+
+void sync_body_acc_init(sync_body_acc_t *acc, char *buf, size_t cap)
+{
+    acc->buf = buf;
+    acc->cap = cap;
+    acc->len = 0;
+    acc->overflow = false;
+}
+
+bool sync_body_acc_add(sync_body_acc_t *acc, const char *data, size_t n)
+{
+    if (!acc->overflow && acc->buf != NULL) {
+        if (acc->len + n > acc->cap - 1) {
+            acc->overflow = true;
+        } else {
+            memcpy(acc->buf + acc->len, data, n);
+            acc->len += n;
+        }
+    }
+    return !acc->overflow; // callers keep draining, then fail the exchange
 }
 
 // --- decode: a small skipping JSON scanner ------------------------------

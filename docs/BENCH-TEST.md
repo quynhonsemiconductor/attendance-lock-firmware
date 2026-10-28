@@ -121,7 +121,7 @@ servo move 700 ms, poll 400 ms.
 | 11 | Power cut mid-unlock | Cut PSU while the lock is released, restore | Boots LOCKED (step 1 behaviour). Optional: confirm the buffered tap events survive (event ring) | |
 | 12 | Brownout backoff | Briefly dip the PSU so the board browns out ×2, then tap | Log `brownout resets: N, release blocked …ms after boot`; releases denied during the backoff window (doubling), taps still log | |
 | 13 | Reader unplugged | Pull the RC522 CS/SPI jumper while running | Log `reader 0 fault (health check) — probing`, red LED, door stays locked; replug → `reader 0 back online` within ~5 s and taps work again | |
-| 14 | Wi-Fi sync (opshub develop) | Provision the 4 NVS keys with the console (§4), wait one sync interval (default 60 min — lower `SYNC_INTERVAL_MIN` for the bench) | Session log: Wi-Fi up, SNTP, allow-list fetch (200 or 304), events uploaded; server sees `battery_mv` + `low_battery` fields on the events | |
+| 14 | Wi-Fi sync (opshub develop) | Provision the 4 NVS keys with the console (§4), wait one sync interval (default 60 min — lower `SYNC_INTERVAL_MIN` for the bench) | Session log: Wi-Fi up, SNTP, allow-list fetch (200 or 304), events uploaded; server sees `battery_mv` + `low_battery` on the envelope EVERY session (heartbeat with an empty ring) | |
 | 15 | Read distance / placement | Move the card away/angle it | Record max stable distance (typically 0–3 cm) and any dead angles; RC522 antenna away from the servo wires | |
 
 Row 5 note: 7-byte-UID cards are *rejected by design* in this build. The
@@ -157,11 +157,21 @@ provisions a plain-http base URL; against a deployed opshub always use
    a card with the UID of a test card (4-byte UID).
 3. Find the laptop's LAN IP (`ifconfig` / `ip a`). The board must reach the
    API directly (not the SPA's dev proxy): provision `set url
-   http://<laptop-ip>:3001` plus token and Wi-Fi (§4). Lower
-   `SYNC_INTERVAL_MIN` (menuconfig → Sync) so the bench does not wait an hour
-   between sessions.
+   http://<laptop-ip>:3001` plus token and Wi-Fi (§4). Set
+   `SYNC_INTERVAL_MIN = 1` (menuconfig → Sync) so the bench does not wait an
+   hour between sessions.
 4. Expected on the board (session log): Wi-Fi up, allow-list fetch **200**
    first session then **304** once the ETag matches, buffered taps uploaded.
 5. Expected in opshub: the Door page lists the terminal as seen/healthy, and
    the taps appear as events — allow-listed taps as access events, unknown
    cards also under the unknown-cards view.
+6. **Session soak (≥3 consecutive sessions at `SYNC_INTERVAL_MIN = 1`):**
+   every session — not just the first — must log Wi-Fi up with an IP,
+   the allow-list exchange (304 after the first) and the events POST (the
+   envelope carries `battery_mv`/`low_battery` each session, empty ring
+   included). Session 2+ getting no IP or a "malformed" 200 on every
+   response means the netif/driver lifetime regression is back — the netif
+   and the Wi-Fi driver are now created ONCE and only started/stopped per
+   session. When the ring holds more than 100 events, one session drains it
+   in back-to-back batches (≤100 each, 60 s budget) until the queue is
+   empty.

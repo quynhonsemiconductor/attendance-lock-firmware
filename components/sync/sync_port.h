@@ -17,6 +17,11 @@ bool sync_port_creds(char *url, size_t url_cap, char *token, size_t token_cap);
 bool sync_port_wifi_up(void);
 void sync_port_wifi_down(void);
 
+// Live battery reading for the session envelope (sent EVERY session, empty
+// ring included — the server's terminal TTL and battery badge key on it).
+// *battery_mv = 0 when no reading is available (unknown is reportable too).
+void sync_port_battery(uint16_t *battery_mv, bool *low_battery);
+
 // One HTTPS exchange against <url><path>. Headers sent: Authorization
 // (Bearer token), User-Agent (qnsc-door-terminal/<version>),
 // If-None-Match when if_none_match[0] != '\0', Content-Type for a body.

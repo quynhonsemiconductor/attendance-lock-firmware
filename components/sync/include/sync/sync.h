@@ -17,6 +17,21 @@
 extern "C" {
 #endif
 
+// Response buffer for the allow-list GET: worst case 256 cards of JSON
+// (~21 KiB with 10-byte UIDs and both windows set). A body that does not
+// fit is a transport failure, never a truncated 200 — the host tests pin
+// the 256-card worst case against this cap.
+#define SYNC_RESP_CAP (24 * 1024)
+
+// The events envelope's dropped field is server-capped (0..100000): a larger
+// local count is CLAMPED for reporting (the store keeps its true count).
+#define SYNC_DROPPED_REPORT_MAX 100000u
+
+// Per-session drain budget: the ring is uploaded in batches of
+// STORE_BATCH_MAX until empty, but a session never spends longer than this
+// on the drain (Wi-Fi session stays bounded; the next session continues).
+#define SYNC_DRAIN_BUDGET_MS 60000u
+
 // Event payload the reader task pushes into the ring (≤ STORE_EVENT_MAX);
 // the sync component owns this wire-side layout.
 typedef struct __attribute__((packed)) {
@@ -58,13 +73,6 @@ size_t sync_encode_event(const sync_event_t *ev, uint32_t seq, char *out, size_t
 size_t sync_decode_allow_list(const char *body, size_t len, store_card_t *out,
                               size_t max_cards, bool *too_many);
 
-// Streams a response body to completion via read_fn (returns bytes read,
-// 0 = EOF, < 0 = error). Fills resp (NUL-terminated, ≤ cap-1 bytes).
-// Returns false when the body does not fit cap-1 (more data followed) or on
-// a read error — an oversized body must never arrive as a truncated 200.
-bool sync_read_body(int (*read_fn)(char *buf, int len, void *ctx), void *ctx, char *resp,
-                    size_t cap, size_t *len_out);
-
 // Parses the events response (fixture: events-response.json):
 // {"acked_through":N,"rejected":[seq,…]}. rejected seqs land in out_rejected
 // (≤ max_rejected); *rejected_len receives the full count even when
@@ -76,11 +84,31 @@ bool sync_decode_events_response(const char *body, size_t len, uint32_t *acked_t
 // Renders the POST /v1/door/terminal/events envelope
 // (fixture: events-request.json) for the given stream + batch.
 // battery_mv/low_battery are envelope-level (door-terminal-v1 contract) and
-// carry the NEWEST event's snapshot — a live reading for the terminal list.
-// Omitted when the batch is empty (no snapshot to speak of). Returns bytes
-// written, or 0 when out is too small (nothing is half-written).
+// emitted whenever a reading exists (battery_mv != 0): an empty batch is
+// still a heartbeat that refreshes the server's terminal TTL and battery
+// badge. With NO reading (battery_mv == 0) BOTH fields are omitted — the
+// server must not read an absent pack as 0 mV (round-2 review item 1).
+// dropped is clamped to SYNC_DROPPED_REPORT_MAX. Returns bytes written, or
+// 0 when out is too small (nothing is half-written).
 size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
+                            uint16_t battery_mv, bool low_battery,
                             const store_event_t *events, size_t n_events, char *out, size_t cap);
+
+// Bounded accumulator for a streamed response body (round-2 review item 4):
+// the ESP port feeds it from HTTP_EVENT_ON_DATA. cap-1 usable bytes; data
+// past the cap latches overflow — an oversized body must never arrive as a
+// silently truncated 200. Host-tested.
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t len;
+    bool overflow;
+} sync_body_acc_t;
+
+void sync_body_acc_init(sync_body_acc_t *acc, char *buf, size_t cap);
+// Adds one chunk. Returns false once overflow is latched (keep draining,
+// then fail the exchange); the chunk is dropped, never truncated in.
+bool sync_body_acc_add(sync_body_acc_t *acc, const char *data, size_t n);
 
 #ifdef __cplusplus
 }

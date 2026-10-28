@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct {
     long status;
@@ -22,7 +23,19 @@ typedef struct {
 
 extern sync_port_req_t sync_host_last_request;
 
-// Clear the script + journal; provisioned = true, radio down.
+// Frozen copy of the last GET (the drain loop's POSTs overwrite the journal
+// above — the If-None-Match asserts read this one).
+extern sync_port_req_t sync_host_last_get;
+
+// Frozen copy of the FIRST POST (the drain's later envelopes overwrite the
+// journal; the dropped counter rides the first one).
+extern sync_port_req_t sync_host_first_post;
+
+// POSTs issued since the last reset (the drain loop tests assert on it).
+extern int sync_host_post_count;
+
+// Clear the script + journal; provisioned = true, radio down, battery
+// 5400 mV / not low.
 void sync_host_reset(void);
 
 // Queue one response (consumed in order; an exhausted script fails the
@@ -31,3 +44,6 @@ void sync_host_enqueue(long status, const char *body, const char *etag, const ch
 
 // Simulate an unprovisioned device.
 void sync_host_set_provisioned(bool on);
+
+// Script the battery reading the next session reports in its envelope.
+void sync_host_set_battery(uint16_t battery_mv, bool low_battery);
