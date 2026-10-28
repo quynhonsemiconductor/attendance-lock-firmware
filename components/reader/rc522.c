@@ -61,7 +61,7 @@ static spi_device_handle_t s_spi;
 // One SPI frame = one CS assertion. Without DMA the host moves at most its
 // 64-byte hardware buffer per transaction. Polling transmit: a frame is a
 // few µs at 4 MHz, far less than the interrupt + task switch of
-// spi_device_transmit — which dominated each poll at the 10 MHz DFS floor.
+// spi_device_transmit, a cost that adds up at the 10 MHz DFS floor.
 #define SPI_FRAME_MAX 64
 #define ADDR_W(reg) ((uint8_t)(((reg) << 1) & 0x7E))
 #define ADDR_R(reg) ((uint8_t)(ADDR_W(reg) | 0x80))
