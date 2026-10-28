@@ -388,15 +388,23 @@ rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint
     }
     gpio_set_level(conf->rst_gpio, 1);
     vTaskDelay(pdMS_TO_TICKS(50)); // crystal restart after power-down (datasheet §9.3.2.6, prototype uses 50 ms)
+    // Polling transmit takes no APB pm lock by itself: unheld, DFS can drop
+    // APB to 10 MHz (or switch it mid-frame) under the SPI clock. Holding
+    // the bus holds that lock — only for the SPI bursts, released across
+    // both sleeps so light sleep between them is untouched.
+    (void)spi_device_acquire_bus(s_spi, portMAX_DELAY);
     chip_init(conf);
     if (!rc522_healthy(conf)) {
         uint8_t v = read_reg(conf, REG_VERSION);
+        spi_device_release_bus(s_spi);
         ESP_LOGW(TAG, "reader cs=%d did not init (VersionReg 0x%02x)", conf->cs_gpio, v);
         return RC522_FAULT;
     }
 
     antenna_on(conf);
+    spi_device_release_bus(s_spi);
     vTaskDelay(pdMS_TO_TICKS(10)); // field settle (ISO 14443 ≥ 5 ms; prototype 10 ms)
+    (void)spi_device_acquire_bus(s_spi, portMAX_DELAY);
 
     rc522_poll_result_t result = RC522_NONE;
     uint8_t reqa = PICC_REQA;
@@ -424,6 +432,7 @@ rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint
     result = RC522_CARD;
 out:
     antenna_off(conf);
+    spi_device_release_bus(s_spi);
     return result;
 }
 
