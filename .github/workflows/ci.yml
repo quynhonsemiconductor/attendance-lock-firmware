@@ -51,6 +51,27 @@ jobs:
           set -euo pipefail
           grep -Eq '^event_ring,[[:space:]]*data,[[:space:]]*0x40,[^,]*,[^,]*,[[:space:]]*encrypted[[:space:]]*$' partitions.csv
 
+      # ccache: the idf image ships it and ESP-IDF's CMake uses it when found,
+      # so cache CCACHE_DIR between runs — the compile goes from a full build to
+      # seconds once warm. Keyed per profile and on the sdkconfig defaults,
+      # because a config change legitimately invalidates objects. NOT caching
+      # managed_components: ADR §2.8 pins "nothing managed" (dependencies.lock
+      # pins an empty set), so there is nothing to cache there.
+      - name: ccache is available (the cache below is worthless without it)
+        run: |
+          set -euo pipefail
+          command -v ccache
+          ccache --version | head -1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: idf-ccache-${{ matrix.profile }}-${{ hashFiles('sdkconfig.defaults*', 'components/**/CMakeLists.txt', 'main/**/CMakeLists.txt') }}
+          restore-keys: |
+            idf-ccache-${{ matrix.profile }}-
+      - name: ccache stats (after)
+        if: always()
+        run: ccache --show-stats || ccache -s
+
       - name: Build (${{ matrix.profile }} profile)
         env:
           PROFILE: ${{ matrix.profile }}
