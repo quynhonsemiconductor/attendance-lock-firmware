@@ -69,28 +69,32 @@ static void trim(char **s)
     *s = p;
 }
 
-// Splits at the first blank: returns the head token and points *s at the
-// trimmed remainder ("" when there is none).
-static char *split(char **s)
+// THE tokenizer — the handler and the echo-mask decision both use it, so a
+// line runs of blanks cannot unmask: skips blank runs, points *out at the
+// token start, returns its length (0 at end of line). Never mutates.
+static size_t tok(const char *s, const char **out)
 {
-    char *head = *s;
-    char *p = head;
-    while (*p != '\0' && *p != ' ' && *p != '\t') {
-        p++;
+    while (s[0] == ' ' || s[0] == '\t') {
+        s++;
     }
-    if (*p != '\0') {
-        *p++ = '\0';
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
+    const char *start = s;
+    while (s[0] != '\0' && s[0] != ' ' && s[0] != '\t') {
+        s++;
     }
-    *s = p;
-    return head;
+    *out = start;
+    return (size_t)(s - start);
+}
+
+// Token-equals for the non-mutating tokenizer.
+static bool tok_is(const char *t, size_t len, const char *lit)
+{
+    return len == strlen(lit) && strncmp(t, lit, len) == 0;
 }
 
 // scheme://host[:port] EXACTLY (http:// only in the dev build): the sync
 // client appends its own paths, so a base URL that carries a path, query,
-// fragment or userinfo separator is a mistake, not a feature.
+// fragment or userinfo separator is a mistake, not a feature. The host is
+// a hostname (letters, digits, '.', '-'): no IPv6 literals, no underscores.
 static bool valid_url(const char *v)
 {
     size_t n = strlen(v);
@@ -110,8 +114,16 @@ static bool valid_url(const char *v)
         return false;
     }
     const char *colon = strchr(host, ':');
-    if (colon == host) {
+    const char *host_end = colon != NULL ? colon : host + strlen(host);
+    if (host_end == host) {
         return false; // ":port" with no host
+    }
+    for (const char *p = host; p < host_end; p++) {
+        bool ok = (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                  (*p >= '0' && *p <= '9') || *p == '.' || *p == '-';
+        if (!ok) {
+            return false;
+        }
     }
     if (colon != NULL) {
         const char *port = colon + 1;
@@ -132,69 +144,102 @@ static bool valid_url(const char *v)
     return true;
 }
 
-static void cmd_set(char *args, char *out, size_t out_cap, size_t *n)
+// value points at the rest of the line after the key token (leading blanks
+// skipped; interior blanks kept — a Wi-Fi pass may contain them).
+static void cmd_set(const char *value, size_t value_len, bool wifi_key, char *out,
+                    size_t out_cap, size_t *n)
 {
-    char *key = split(&args);
-    if (key[0] == '\0' || args[0] == '\0') {
-        appendf(out, out_cap, n, "error: set needs a key and a value\n" USAGE);
-        return;
-    }
-    trim(&args); // the value is the rest of the line (Wi-Fi pass may contain blanks)
-
-    if (strcmp(key, "url") == 0) {
-        if (!valid_url(args)) {
+    if (!wifi_key) {
+        if (value_len == 0 || value_len > TOKEN_MAX || strpbrk(value, " \t") != NULL) {
             appendf(out, out_cap, n,
-                    "error: url must be scheme://host[:port] with no path, query or "
-                    "fragment (https only; http:// is dev-build only)\n");
+                    "error: token must be 1..127 characters without blanks\n");
             return;
         }
-        if (!provision_port_set_str(KEY_URL, args)) {
-            appendf(out, out_cap, n, "error: could not store the url\n");
-            return;
-        }
-        appendf(out, out_cap, n, "ok: url set\n");
-        return;
-    }
-    if (strcmp(key, "token") == 0) {
-        size_t len = strlen(args);
-        if (len == 0 || len > TOKEN_MAX || strpbrk(args, " \t") != NULL) {
-            appendf(out, out_cap, n, "error: token must be 1..127 characters without blanks\n");
-            return;
-        }
-        if (!provision_port_set_str(KEY_TOKEN, args)) {
+        if (!provision_port_set_str(KEY_TOKEN, value)) {
             appendf(out, out_cap, n, "error: could not store the token\n");
             return;
         }
         appendf(out, out_cap, n, "ok: token set\n");
         return;
     }
-    if (strcmp(key, "wifi") == 0) {
-        char *wkey = split(&args);
-        trim(&args);
-        if (strcmp(wkey, "ssid") == 0) {
-            size_t len = strlen(args);
-            if (len == 0 || len > SSID_MAX) {
-                appendf(out, out_cap, n, "error: ssid must be 1..32 bytes\n");
-                return;
-            }
-            if (!provision_port_set_str(KEY_SSID, args)) {
-                appendf(out, out_cap, n, "error: could not store the wifi ssid\n");
-                return;
-            }
-            appendf(out, out_cap, n, "ok: wifi ssid set\n");
+    if (value_len == 0 || value_len > SSID_MAX) {
+        appendf(out, out_cap, n, "error: ssid must be 1..32 bytes\n");
+        return;
+    }
+    if (!provision_port_set_str(KEY_SSID, value)) {
+        appendf(out, out_cap, n, "error: could not store the wifi ssid\n");
+        return;
+    }
+    appendf(out, out_cap, n, "ok: wifi ssid set\n");
+}
+
+static void cmd_set_pass(const char *value, size_t value_len, char *out, size_t out_cap,
+                         size_t *n)
+{
+    if (value_len < PASS_MIN || value_len > PASS_MAX) {
+        appendf(out, out_cap, n, "error: wifi pass must be 8..63 bytes\n");
+        return;
+    }
+    if (!provision_port_set_str(KEY_PASS, value)) {
+        appendf(out, out_cap, n, "error: could not store the wifi pass\n");
+        return;
+    }
+    appendf(out, out_cap, n, "ok: wifi pass set\n");
+}
+
+// Dispatch for "set …": [set] key tokens, then the value is the rest of the
+// line. Runs of blanks separate tokens exactly like tok() (and the echo
+// mask), so every accepted spelling of a secret command stays masked.
+static void cmd_set_dispatch(const char *args, char *out, size_t out_cap, size_t *n)
+{
+    const char *t;
+    size_t klen = tok(args, &t);
+    if (klen == 0) {
+        appendf(out, out_cap, n, "error: set needs a key and a value\n" USAGE);
+        return;
+    }
+    const char *value = t + klen;
+    while (value[0] == ' ' || value[0] == '\t') {
+        value++;
+    }
+    size_t vlen = strlen(value);
+    if (vlen == 0) {
+        appendf(out, out_cap, n, "error: set needs a key and a value\n" USAGE);
+        return;
+    }
+
+    if (tok_is(t, klen, "url")) {
+        if (!valid_url(value)) {
+            appendf(out, out_cap, n,
+                    "error: url must be scheme://host[:port] with no path, query or "
+                    "fragment (https only; http:// is dev-build only)\n");
             return;
         }
-        if (strcmp(wkey, "pass") == 0) {
-            size_t len = strlen(args);
-            if (len < PASS_MIN || len > PASS_MAX) {
-                appendf(out, out_cap, n, "error: wifi pass must be 8..63 bytes\n");
-                return;
-            }
-            if (!provision_port_set_str(KEY_PASS, args)) {
-                appendf(out, out_cap, n, "error: could not store the wifi pass\n");
-                return;
-            }
-            appendf(out, out_cap, n, "ok: wifi pass set\n");
+        if (!provision_port_set_str(KEY_URL, value)) {
+            appendf(out, out_cap, n, "error: could not store the url\n");
+            return;
+        }
+        appendf(out, out_cap, n, "ok: url set\n");
+        return;
+    }
+    if (tok_is(t, klen, "token")) {
+        cmd_set(value, vlen, false, out, out_cap, n);
+        return;
+    }
+    if (tok_is(t, klen, "wifi")) {
+        const char *wt;
+        size_t wlen = tok(value, &wt);
+        const char *wval = wt + wlen;
+        while (wval[0] == ' ' || wval[0] == '\t') {
+            wval++;
+        }
+        size_t wvlen = strlen(wval);
+        if (tok_is(wt, wlen, "ssid")) {
+            cmd_set(wval, wvlen, true, out, out_cap, n);
+            return;
+        }
+        if (tok_is(wt, wlen, "pass")) {
+            cmd_set_pass(wval, wvlen, out, out_cap, n);
             return;
         }
     }
@@ -215,17 +260,26 @@ static void cmd_status(char *out, size_t out_cap, size_t *n)
 }
 
 // True when the line being typed has reached a write-only value: from
-// "set token " / "set wifi pass " on, the console echoes '*' so the monitor
-// (and the logs BENCH-TEST asks to save) never shows the secret.
+// "set token " / "set wifi pass " on (with ANY blank run as separator —
+// tokenized exactly like the handler via tok()), the console echoes '*' so
+// the monitor (and the logs BENCH-TEST asks to save) never shows the secret.
 bool provision_input_masked(const char *line)
 {
-    static const char *const masked[] = { "set token ", "set wifi pass " };
-    while (line[0] == ' ' || line[0] == '\t') {
-        line++;
+    const char *t;
+    size_t len = tok(line, &t);
+    if (!tok_is(t, len, "set")) {
+        return false;
     }
-    for (size_t i = 0; i < sizeof(masked) / sizeof(masked[0]); i++) {
-        if (strncmp(line, masked[i], strlen(masked[i])) == 0) {
-            return true;
+    const char *rest = t + len;
+    len = tok(rest, &t);
+    if (tok_is(t, len, "token")) {
+        return t[len] == ' ' || t[len] == '\t'; // a separator is typed: value follows
+    }
+    if (tok_is(t, len, "wifi")) {
+        rest = t + len;
+        len = tok(rest, &t);
+        if (tok_is(t, len, "pass")) {
+            return t[len] == ' ' || t[len] == '\t';
         }
     }
     return false;
@@ -239,12 +293,14 @@ void provision_handle_line(const char *line, char *out, size_t out_cap)
     if (strlen(line) < sizeof(buf)) {
         snprintf(buf, sizeof(buf), "%s", line);
         char *s = buf;
-        trim(&s);
-        if (s[0] != '\0') {
-            char *cmd = split(&s);
-            if (strcmp(cmd, "set") == 0) {
-                cmd_set(s, out, out_cap, &n);
-            } else if (strcmp(cmd, "status") == 0 && s[0] == '\0') {
+        trim(&s); // the terminal's CR/LF and surrounding blanks
+        const char *t;
+        size_t len = tok(s, &t);
+        if (len > 0) {
+            const char *args = t + len;
+            if (tok_is(t, len, "set")) {
+                cmd_set_dispatch(args, out, out_cap, &n);
+            } else if (tok_is(t, len, "status") && tok(args, &t) == 0) {
                 cmd_status(out, out_cap, &n);
             } else {
                 appendf(out, out_cap, &n, "error: unknown command\n" USAGE);

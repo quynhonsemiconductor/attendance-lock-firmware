@@ -159,13 +159,36 @@ void test_input_masking_covers_write_only_values(void)
     TEST_ASSERT_TRUE(provision_input_masked("set wifi pass "));
     TEST_ASSERT_TRUE(provision_input_masked("set wifi pass hunter2"));
     TEST_ASSERT_TRUE(provision_input_masked("  set token x")); // leading blanks
+    // BLANK RUNS separate tokens exactly like the handler (mask-bypass fix):
+    // every spelling the parser ACCEPTS is masked the same way
+    TEST_ASSERT_TRUE(provision_input_masked("set  token x")); // double space
+    TEST_ASSERT_TRUE(provision_input_masked("set \ttoken x")); // tab separator
+    TEST_ASSERT_TRUE(provision_input_masked("set   token x")); // triple space
+    TEST_ASSERT_TRUE(provision_input_masked("set  wifi  pass x"));
+    TEST_ASSERT_TRUE(provision_input_masked(" set token x"));
     // printable values and everything else echo normally
     TEST_ASSERT_FALSE(provision_input_masked("set tok"));
+    TEST_ASSERT_FALSE(provision_input_masked("set token")); // no separator typed yet
     TEST_ASSERT_FALSE(provision_input_masked("set tokenx a"));
     TEST_ASSERT_FALSE(provision_input_masked("set url https://h"));
+    TEST_ASSERT_FALSE(provision_input_masked("set  url https://h"));
+    TEST_ASSERT_FALSE(provision_input_masked("set  wifi  ssid Net"));
     TEST_ASSERT_FALSE(provision_input_masked("set wifi ssid Net"));
     TEST_ASSERT_FALSE(provision_input_masked("status"));
     TEST_ASSERT_FALSE(provision_input_masked(""));
+}
+
+void test_handler_accepts_blank_runs_like_the_mask(void)
+{
+    // The mask only holds if the handler tokenizes identically: every
+    // blank-run spelling that is masked must also WORK.
+    TEST_ASSERT_NOT_NULL(strstr(send("set  token s3cret-token-value"), "ok"));
+    TEST_ASSERT_EQUAL_STRING("s3cret-token-value", provision_host_get("token"));
+    TEST_ASSERT_NOT_NULL(strstr(send("set   wifi\tpass hunter2hunter2"), "ok"));
+    TEST_ASSERT_EQUAL_STRING("hunter2hunter2", provision_host_get("wifi_pass"));
+    TEST_ASSERT_NOT_NULL(strstr(send("set\twifi  ssid Bench"), "ok"));
+    TEST_ASSERT_EQUAL_STRING("Bench", provision_host_get("wifi_ssid"));
+    TEST_ASSERT_NULL(strstr(send("status"), "s3cret-token-value")); // still write-only
 }
 
 void test_set_url_is_scheme_host_port_only(void)
@@ -183,6 +206,7 @@ void test_set_url_is_scheme_host_port_only(void)
         "https://user@host",   "https://user:pw@host", "https://host:",
         "https://:3001",       "https://host:0",       "https://host:65536",
         "https://host:99999",  "https://host:abc",     "https://host:30x01",
+        "https://my_host:3001", "https://under_score",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         provision_host_reset(); // each case starts from an unset url
@@ -207,6 +231,7 @@ int main(void)
     RUN_TEST(test_unknown_and_forbidden_commands);
     RUN_TEST(test_empty_line_is_silent_and_crlf_tolerated);
     RUN_TEST(test_input_masking_covers_write_only_values);
+    RUN_TEST(test_handler_accepts_blank_runs_like_the_mask);
     RUN_TEST(test_set_url_is_scheme_host_port_only);
     return UNITY_END();
 }
