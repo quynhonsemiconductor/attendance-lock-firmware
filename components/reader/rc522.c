@@ -124,14 +124,17 @@ static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
     write_reg(conf, REG_COM_IRQ, 0x7F); // clear every IRQ flag
     write_reg(conf, REG_FIFO_LEVEL, 0x80); // flush FIFO
     write_fifo(conf, tx, tx_len);
-    write_reg(conf, REG_BIT_FRAMING, bit_framing);
-    write_reg(conf, REG_COMMAND, CMD_TRANSCEIVE); // then StartSend below
-    write_reg(conf, REG_COMMAND, (uint8_t)(CMD_TRANSCEIVE | 0x80));
+    write_reg(conf, REG_COMMAND, CMD_TRANSCEIVE);
+    // StartSend is BitFramingReg bit 7, not a CommandReg bit: without it
+    // Transceive waits forever and no REQA ever leaves the antenna.
+    write_reg(conf, REG_BIT_FRAMING, (uint8_t)(bit_framing | 0x80));
 
     int64_t deadline_us = esp_timer_get_time() + 36000;
+    bool got_rx = false;
     while (esp_timer_get_time() < deadline_us) {
         uint8_t irq = read_reg(conf, REG_COM_IRQ);
         if (irq & IRQ_RX) {
+            got_rx = true;
             break;
         }
         if (irq & IRQ_TIMER) {
@@ -140,6 +143,9 @@ static size_t transceive(const rc522_conf_t *conf, const uint8_t *tx, size_t tx_
         if (read_reg(conf, REG_ERROR) & ERR_FRAME) {
             return 0;
         }
+    }
+    if (!got_rx) {
+        return 0; // software bound hit: the FIFO still holds our own TX bytes
     }
     // CRCErr latches only on CRC-on exchanges (select/halt): a reply with a
     // bad CRC must not reach the caller as a valid frame.
