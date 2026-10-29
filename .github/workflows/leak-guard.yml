@@ -35,7 +35,9 @@ jobs:
       # The tree is scanned at HEAD only (gitleaks owns history). The runtime
       # identifiers disarm if their org variable is unset — the summary names
       # which patterns ran.
-      - uses: quynhonsemiconductor/ci/actions/leak-guard@ae52bdb8f3a5eecfc8d5f2665053ac872d4cb6f0 # v1.26.0
+      - uses: quynhonsemiconductor/ci/actions/leak-guard@4ab3aaec8d70a2f0fb9a38e8a5a96cebe90e58e5 # v1.27.0
         with:
           entra-tenant-id: ${{ vars.ENTRA_TENANT_ID }}
-          aws-account-id: ${{ vars.AWS_ACCOUNT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # aws-account-id deliberately NOT passed: not armed by the identifier
+          # policy (2026-10-29) — the account closes after the on-prem cutover.
