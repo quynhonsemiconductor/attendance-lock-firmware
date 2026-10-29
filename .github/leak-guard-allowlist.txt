@@ -1,0 +1,7 @@
+# Intentionally public names in this repository (leak-guard suppresses a finding
+# when a line below matches its text OR its repository-relative path).
+#
+# The bench prototype's Arduino config documents its own LAN defaults: the AP
+# gateway it advertises and the bench sync server's address.
+192\.168\.4\.1
+192\.168\.1\.10

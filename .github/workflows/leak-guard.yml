@@ -1,0 +1,43 @@
+# =============================================================================
+# Leak guard — deterministic check that internal names stay out of this public
+# repository: qnsc.vn hostnames and mail, GUIDs, private addresses, and (fed in
+# at RUNTIME from org variables, never written here) the org's Entra tenant GUID
+# and AWS account number. Patterns and exemptions live in ci's
+# actions/leak-guard; this repository's intentional public names are allowlisted
+# in .github/leak-guard-allowlist.txt.
+# =============================================================================
+name: Leak guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # NO `branches:` filter — see tf-modules' ci.yml for the stacked-PR incident
+    # a base-branch filter caused.
+
+concurrency:
+  group: leak-guard-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  leak-guard:
+    name: Leak guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The tree is scanned at HEAD only (gitleaks owns history). The runtime
+      # identifiers disarm if their org variable is unset — the summary names
+      # which patterns ran.
+      - uses: quynhonsemiconductor/ci/actions/leak-guard@4ab3aaec8d70a2f0fb9a38e8a5a96cebe90e58e5 # v1.27.0
+        with:
+          entra-tenant-id: ${{ vars.ENTRA_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # aws-account-id deliberately NOT passed: not armed by the identifier
+          # policy (2026-10-29) — the account closes after the on-prem cutover.
