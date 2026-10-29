@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: quynhonsemiconductor/ci/.github/workflows/code-review.yml@198c470a4f3ab57bfd74a987592287acd2d249dc # v1.25.0
+    uses: quynhonsemiconductor/ci/.github/workflows/code-review.yml@4ab3aaec8d70a2f0fb9a38e8a5a96cebe90e58e5 # v1.27.0
     with:
       product: attendance-lock-firmware
       profiles: workflows
