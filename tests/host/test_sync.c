@@ -258,7 +258,7 @@ void test_encode_envelope_matches_fixture(void)
     uint8_t stream[16] = { 0x6f, 0x1a, 0x2b, 0x3c, 0x00, 0x00, 0x40, 0x00,
                            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
     char out[1024];
-    size_t n = sync_encode_envelope(stream, 0, 5400, false, &ev, 1, out, sizeof(out));
+    size_t n = sync_encode_envelope(stream, 0, 5400, false, false, &ev, 1, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     char want[1024];
     strcpy(want, fixture("events-request.json"));
@@ -270,7 +270,7 @@ void test_encode_envelope_clamp_and_battery_omission_rules(void)
 {
     uint8_t stream[16] = { 0 };
     char out[256];
-    size_t n = sync_encode_envelope(stream, 100001, 4900, true, NULL, 0, out, sizeof(out));
+    size_t n = sync_encode_envelope(stream, 100001, 4900, true, false, NULL, 0, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_TRUE(strstr(out, "\"dropped\":100000") != NULL); // server cap
     TEST_ASSERT_TRUE(strstr(out, "\"battery_mv\":4900") != NULL); // empty batch:
@@ -278,10 +278,26 @@ void test_encode_envelope_clamp_and_battery_omission_rules(void)
     TEST_ASSERT_TRUE(strstr(out, "\"events\":[]") != NULL);
     // No reading (battery_mv == 0): BOTH fields are omitted — the server
     // must not read an absent pack as 0 mV (round-2 review item 1).
-    n = sync_encode_envelope(stream, 0, 0, false, NULL, 0, out, sizeof(out));
+    n = sync_encode_envelope(stream, 0, 0, false, false, NULL, 0, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_NULL(strstr(out, "battery_mv"));
     TEST_ASSERT_NULL(strstr(out, "low_battery"));
+    TEST_ASSERT_NULL(strstr(out, "battery_fault")); // absence = healthy
+}
+
+void test_encode_envelope_battery_fault_omits_voltage(void)
+{
+    // Round-3 bench finding: a floating divider reported 33,9xx mV and the
+    // server rejected the envelope with 422. A sensor fault must never put
+    // an implausible battery_mv on the wire; the optional flag rides instead.
+    uint8_t stream[16] = { 0 };
+    char out[256];
+    size_t n = sync_encode_envelope(stream, 0, 0, false, true, NULL, 0, out, sizeof(out));
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_NULL(strstr(out, "battery_mv"));
+    TEST_ASSERT_NULL(strstr(out, "low_battery"));
+    TEST_ASSERT_TRUE(strstr(out, "\"battery_fault\":true") != NULL);
+    TEST_ASSERT_TRUE(strstr(out, "\"events\":[]") != NULL);
 }
 
 // --- body accumulator (round-2 review item 4) ---------------------------
@@ -368,6 +384,22 @@ void test_session_heartbeat_battery_without_events(void)
     sync_host_enqueue(304, NULL, NULL, NULL);
     sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
     TEST_ASSERT_TRUE(sync_session_run());
+    TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "battery_mv"));
+    TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "low_battery"));
+    TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "battery_fault"));
+}
+
+void test_session_battery_fault_rides_the_envelope(void)
+{
+    // Round-3 bench finding: the divider was not wired, the tap floated at
+    // full scale and every batch was rejected (422). With a fault the
+    // envelope carries NO voltage and the optional flag instead.
+    sync_host_set_battery(0, false);
+    sync_host_set_battery_fault(true);
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"battery_fault\":true") != NULL);
     TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "battery_mv"));
     TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "low_battery"));
 }
@@ -671,6 +703,166 @@ void test_session_etag_round_trips_byte_exact(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(etag66, back, 66);
 }
 
+// --- session summary line (round-3 bench finding) -----------------------
+
+void test_summary_ok_session(void)
+{
+    // 304 + a Date header: the session is clean AND has a time source, so
+    // the line is the plain ok form a bench operator sees between failures.
+    sync_host_enqueue(304, NULL, NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_TRUE(r.ok);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 0, 3600000, line, sizeof(line)) > 0);
+    TEST_ASSERT_EQUAL_STRING("session ok allow-list=304 events=0/0 next in 3600 s (backoff 0/5)",
+                             line);
+}
+
+void test_summary_ok_without_time_source_is_visible(void)
+{
+    // SNTP and the Date header both failed: still a successful session
+    // (contract: device_ts 1970 + time_synced false), but the summary says
+    // why the timestamps are wrong.
+    sync_host_enqueue(304, NULL, NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 0, 60000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "session ok (sntp: no time source)") != NULL);
+}
+
+void test_summary_401_names_the_token(void)
+{
+    sync_host_enqueue(401, NULL, NULL, NULL);
+    sync_host_enqueue(401, NULL, NULL, NULL);
+    TEST_ASSERT_FALSE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL(SYNC_STAGE_HTTP, r.fail_stage);
+    TEST_ASSERT_EQUAL_INT(401, (int)r.fail_http_status);
+    TEST_ASSERT_EQUAL_INT(401, (int)r.allow_list_status);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 2, 60000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(
+        strstr(line, "session failed (http 401: terminal token refused: check `set token`)") !=
+        NULL);
+    TEST_ASSERT_TRUE(strstr(line, "allow-list=401") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "next in 60 s (backoff 2/5)") != NULL);
+}
+
+void test_summary_dns_failure(void)
+{
+    // Empty script: the GET never reaches an HTTP status — the URL-typo
+    // shape from the bench log ("Connection failed, sock < 0>").
+    TEST_ASSERT_FALSE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL(SYNC_STAGE_DNS, r.fail_stage);
+    TEST_ASSERT_EQUAL_INT(0, (int)r.allow_list_status);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 1, 30000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "session failed (dns: cannot resolve or connect)") != NULL);
+    TEST_ASSERT_TRUE(strstr(line, "allow-list=none") != NULL);
+}
+
+void test_summary_tls_carries_the_platform_code(void)
+{
+    sync_host_fail_http(SYNC_STAGE_TLS, 0x8001);
+    TEST_ASSERT_FALSE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL(SYNC_STAGE_TLS, r.fail_stage);
+    TEST_ASSERT_EQUAL_INT(0x8001, r.fail_code);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 1, 30000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "session failed (tls: TLS handshake failed, code 0x8001)") !=
+                     NULL);
+}
+
+void test_summary_wifi_and_ip_stages(void)
+{
+    sync_host_fail_wifi(SYNC_STAGE_IP);
+    TEST_ASSERT_FALSE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL(SYNC_STAGE_IP, r.fail_stage);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 1, 30000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "session failed (ip: associated, no IP (DHCP))") != NULL);
+}
+
+void test_summary_unprovisioned_says_which_commands(void)
+{
+    sync_host_set_provisioned(false);
+    TEST_ASSERT_FALSE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL(SYNC_STAGE_CONFIG, r.fail_stage);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 1, 30000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "session failed (config: unprovisioned — run `set url` and "
+                                  "`set token`)") != NULL);
+}
+
+void test_summary_422_points_at_the_envelope(void)
+{
+    sync_host_enqueue(304, NULL, NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(422, "{\"message\":\"battery_mv must be between 3000 and 9000\"}", NULL,
+                      NULL);
+    TEST_ASSERT_FALSE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL(SYNC_STAGE_HTTP, r.fail_stage);
+    TEST_ASSERT_EQUAL_INT(422, (int)r.fail_http_status);
+    TEST_ASSERT_EQUAL_INT(304, (int)r.allow_list_status);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 1, 30000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "session failed (http 422: server rejected the envelope)") !=
+                     NULL);
+}
+
+void test_summary_counts_events_acked_of_sent(void)
+{
+    // 3 queued; the first round acks 2, the second round re-sends seq 3 and
+    // acks it. "sent" counts DISTINCT events, so the summary reads 3/3.
+    uint8_t payload[sizeof(sync_event_t)];
+    sync_event_t ev = fixture_event();
+    memcpy(payload, &ev, sizeof(ev));
+    for (uint32_t i = 0; i < 3; i++) {
+        TEST_ASSERT_TRUE(store_event_push(payload, sizeof(payload), NULL));
+    }
+    sync_host_enqueue(304, NULL, NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"acked_through\":2,\"rejected\":[]}", NULL, NULL);
+    sync_host_enqueue(200, "{\"acked_through\":3,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL_UINT32(3, r.events_sent);
+    TEST_ASSERT_EQUAL_UINT32(3, r.events_acked);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 0, 3600000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "events=3/3") != NULL);
+}
+
+void test_summary_backoff_display_caps_at_five(void)
+{
+    TEST_ASSERT_FALSE(sync_session_run()); // dns failure
+    sync_session_result_t r;
+    sync_session_result(&r);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 9, 481000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "next in 481 s (backoff 5/5)") != NULL);
+    // A line that does not fit is a failure, not a truncated summary.
+    char tiny[8];
+    TEST_ASSERT_EQUAL_size_t(0, sync_format_summary(&r, 9, 481000, tiny, sizeof(tiny)));
+    TEST_ASSERT_EQUAL_STRING("", tiny);
+}
+
 // --- backoff ------------------------------------------------------------
 
 void test_next_delay_interval_when_clean(void)
@@ -705,10 +897,12 @@ int main(void)
     RUN_TEST(test_encode_event_unsynced_and_denied_out);
     RUN_TEST(test_encode_envelope_matches_fixture);
     RUN_TEST(test_encode_envelope_clamp_and_battery_omission_rules);
+    RUN_TEST(test_encode_envelope_battery_fault_omits_voltage);
     RUN_TEST(test_body_acc_fills_exact_and_latches_overflow);
     RUN_TEST(test_session_allow_list_200_replaces_cache);
     RUN_TEST(test_session_304_keeps_cache_and_sends_etag);
     RUN_TEST(test_session_heartbeat_battery_without_events);
+    RUN_TEST(test_session_battery_fault_rides_the_envelope);
     RUN_TEST(test_session_uploads_batch_and_acks);
     RUN_TEST(test_session_reports_dropped_and_acks_it);
     RUN_TEST(test_session_failed_post_keeps_batch_and_dropped);
@@ -725,6 +919,16 @@ int main(void)
     RUN_TEST(test_session_stops_when_round_makes_no_progress);
     RUN_TEST(test_session_corrupt_only_batch_cleared_locally);
     RUN_TEST(test_session_etag_round_trips_byte_exact);
+    RUN_TEST(test_summary_ok_session);
+    RUN_TEST(test_summary_ok_without_time_source_is_visible);
+    RUN_TEST(test_summary_401_names_the_token);
+    RUN_TEST(test_summary_dns_failure);
+    RUN_TEST(test_summary_tls_carries_the_platform_code);
+    RUN_TEST(test_summary_wifi_and_ip_stages);
+    RUN_TEST(test_summary_unprovisioned_says_which_commands);
+    RUN_TEST(test_summary_422_points_at_the_envelope);
+    RUN_TEST(test_summary_counts_events_acked_of_sent);
+    RUN_TEST(test_summary_backoff_display_caps_at_five);
     RUN_TEST(test_next_delay_interval_when_clean);
     RUN_TEST(test_next_delay_backoff_grows_and_caps);
     return UNITY_END();

@@ -92,8 +92,12 @@ static void feedback_off(void)
 
 static bool battery_deny(uint32_t battery_mv)
 {
-    return power_should_deny(battery_mv, CONFIG_POWER_BATTERY_CUTOFF_MV,
-                             CONFIG_POWER_BATTERY_DENY_MARGIN_MV) ||
+    // An implausible reading (divider fault) denies like a low pack:
+    // fail-secure. Round-3 bench finding: without this arm "34 V" from an
+    // unwired divider let every release through.
+    return power_release_blocked(battery_mv, CONFIG_POWER_BATTERY_CUTOFF_MV,
+                                 CONFIG_POWER_BATTERY_DENY_MARGIN_MV,
+                                 CONFIG_POWER_BATTERY_MIN_MV, CONFIG_POWER_BATTERY_MAX_MV) ||
            power_brownout_blocked(now_ms());
 }
 
@@ -102,14 +106,25 @@ static bool battery_deny(uint32_t battery_mv)
 static uint32_t s_last_battery_mv;
 static bool s_last_low_battery;
 static bool s_battery_valid;
+static bool s_battery_fault; // reading exists but cannot be a pack voltage
 
 // Refresh the cached reading. Servo must be IDLE here: the move surge sags
-// the rail and would read a false low (false deny).
+// the rail and would read a false low (false deny). The raw reading is
+// cached even when it is implausible, so the release gate sees the fault.
 static void sample_battery(void)
 {
-    s_last_battery_mv = power_battery_mv();
-    s_last_low_battery = power_is_low(s_last_battery_mv, CONFIG_POWER_BATTERY_LOW_MV);
-    s_battery_valid = s_last_battery_mv != 0;
+    uint32_t mv = power_battery_mv();
+    bool plausible = power_reading_plausible(mv, CONFIG_POWER_BATTERY_MIN_MV,
+                                             CONFIG_POWER_BATTERY_MAX_MV);
+    if (!plausible && !s_battery_fault) {
+        ESP_LOGW(TAG, "battery reading implausible (%u mV): divider wiring?", (unsigned)mv);
+    } else if (plausible && s_battery_fault) {
+        ESP_LOGI(TAG, "battery reading plausible again (%u mV)", (unsigned)mv);
+    }
+    s_battery_fault = !plausible;
+    s_last_battery_mv = mv;
+    s_last_low_battery = power_is_low(mv, CONFIG_POWER_BATTERY_LOW_MV) && plausible;
+    s_battery_valid = mv != 0;
 }
 
 static void handle_tap(const door_msg_t *msg)
@@ -131,9 +146,10 @@ static void handle_tap(const door_msg_t *msg)
     }
     door_out_t out = door_fsm_apply(&s_fsm, now_ms(), d);
     apply_out(&out);
-    ESP_LOGI(TAG, "tap r=%u %s (%s) battery=%umV%s", msg->reader,
+    ESP_LOGI(TAG, "tap r=%u %s (%s) battery=%umV%s%s", msg->reader,
              d == DOOR_ALLOW ? "allow" : "deny", door_decision_name(d), battery_mv,
-             s_last_low_battery && s_battery_valid ? " low" : "");
+             s_last_low_battery && s_battery_valid ? " low" : "",
+             s_battery_fault ? " fault" : "");
 
     sync_event_t ev = {
         .reader = msg->reader,
@@ -274,6 +290,12 @@ void app_main(void)
     // here; the reader and door tasks subscribe themselves.
 
     door_fsm_init(&s_fsm, CONFIG_DOOR_UNLOCK_HOLD_MS);
+    if (s_battery_fault) {
+        // Same red fault pattern a reader fault shows (2 s): the pack
+        // reading is unusable, which is a fault, not a battery level.
+        door_out_t fault = door_fsm_fault(&s_fsm, now_ms());
+        gpio_set_level(CONFIG_DOOR_FEEDBACK_GPIO_RED, fault.red ? 1 : 0);
+    }
     s_taps = xQueueCreate(8, sizeof(door_msg_t));
     reload_allow_list(); // primes buffer 0 (and flips to it)
 
@@ -287,9 +309,11 @@ void app_main(void)
     if (!store_ok) {
         ESP_LOGE(TAG, "store unavailable — taps still decide from an empty cache");
     }
-    if (power_low_battery()) {
+    if (s_last_low_battery && s_battery_valid) {
         // Report only — it never unlocks (battery decisions 2026-10-25).
-        ESP_LOGW(TAG, "battery low at boot: %u mV", (unsigned)power_battery_mv());
+        // The cached sample is used on purpose: a second ADC read here would
+        // race the boot servo move and can read the sagging rail.
+        ESP_LOGW(TAG, "battery low at boot: %u mV", (unsigned)s_last_battery_mv);
     }
     if (power_brownout_count() > 0) {
         ESP_LOGW(TAG, "%u brownout resets since the last clean boot — releases "

@@ -93,6 +93,17 @@ secret never shows on the monitor or in the saved log.
 Commands not listed above do not exist — there is no unlock, card or
 test-output command. (Row 15 is read distance and does not need provisioning.)
 
+**Before the first sync test, verify the battery reading.** Tap an
+allow-listed card and read `battery=` in the `tap r=0 ...` log line: it must
+read **4500–6500 mV** for the 4.5–6.5 V pack/PSU. The firmware treats a
+reading outside the plausibility window (Kconfig `POWER_BATTERY_MIN_MV` /
+`POWER_BATTERY_MAX_MV`, default 3000–9000 mV) as a **sensor fault**: it logs
+`battery reading implausible (<mv> mV): divider wiring?`, shows the red fault
+LED, omits `battery_mv` from the sync envelope and sends
+`"battery_fault":true` instead, and denies releases (fail-secure). A reading
+near 33,9xx mV means the divider tap is not wired (GPIO1 floating) — fix the
+wiring (§2) before testing sync.
+
 Moving the terminal to another server (re-provisioning): register on the
 new server first, then on the console set the **token before the url**. A
 sync session that runs between the two writes fails 401 and keeps its queue
@@ -100,6 +111,35 @@ sync session that runs between the two writes fails 401 and keeps its queue
 url means the new server's first contact already carries the matching
 token — its terminal health starts clean instead of logging bad-token
 attempts.
+
+### Reading the sync log
+
+Every session ends with one INFO line, success included, so the cadence is
+visible without the server log:
+
+```
+sync: session ok|failed (<stage>: <detail>) allow-list=<200|304|status|none> events=<acked>/<sent> next in <s> s (backoff <n>/5)
+```
+
+| Line | Meaning | Fix |
+|---|---|---|
+| `session ok allow-list=200 events=0/0 next in 3600 s (backoff 0/5)` | Clean session: allow-list fetched, empty-ring heartbeat sent. | None. |
+| `allow-list=304` | Cached list unchanged (the ETag matched). | None. |
+| `allow-list=none` | The GET never reached an HTTP status (transport failed). | Read the `(<stage>: ...)` part. |
+| `events=3/3` | Server acked 3 of the 3 distinct events sent this session. | None. |
+| `events=0/5` | 5 events were attempted, none acked; the batch stays queued. | Read the stage/detail; nothing is lost. |
+| `session failed (wifi: radio did not connect)` | SSID/password wrong, AP down, or the AP is 5 GHz-only. | `set wifi ssid`, `set wifi pass`; check the AP. |
+| `session failed (ip: associated, no IP (DHCP))` | Associated but no DHCP address within 15 s. | Check the AP's DHCP pool / client isolation. |
+| `session ok (sntp: no time source)` | No SNTP and no usable Date header; events carry 1970 + `time_synced:false` (correct per contract). | Open UDP 123 or check the server's Date header. Not a sync failure. |
+| `session failed (dns: cannot resolve or connect)` | URL typo, host down, or a blocked port — ESP-IDF reports DNS and TCP-connect failures alike. | `set url <scheme://host[:port]>`; reach the host from a laptop first. |
+| `session failed (dns: ..., code 0x...)` | Same failure with the platform error code. | As above; quote the code when asking for help. |
+| `session failed (tls: TLS handshake failed, code 0x...)` | HTTPS on the wrong port, an untrusted certificate, or a clock that makes the cert not-yet-valid. | Confirm `https://` and the port/CA; the first session after a cold boot may need SNTP before TLS can validate dates. |
+| `session failed (http 401: terminal token refused: check `set token`)` | Token wrong, rotated, or the terminal was deleted. | Re-register the terminal in opshub (§7) and `set token`. |
+| `session failed (http 422: server rejected the envelope)` | The server refused the JSON envelope; the warning just above quotes the first 120 bytes of its body. | Fix the named field. A bad battery reading now arrives as `battery_fault`, so a 422 here is a different field. |
+| `session failed (http 500: unexpected status)` | Server-side error. | Check the opshub log; the ring keeps the events. |
+| `session failed (config: unprovisioned — run `set url` and `set token`)` | NVS has no URL/token. | §4. |
+| `session failed (config: no Wi-Fi credentials ...)` | NVS has no SSID/password. | §4. |
+| `next in 30 s (backoff 3/5)` | Retry cadence: 30 s doubling per consecutive failure, capped at 8 min plus 0–25 % jitter; n is the consecutive-failure count, shown capped at 5. | None — it returns to `backoff 0/5` and the normal interval after one clean session. |
 
 ## 5. Bench checklist
 
@@ -121,7 +161,7 @@ servo move 700 ms, poll 400 ms.
 | 11 | Power cut mid-unlock | Cut PSU while the lock is released, restore | Boots LOCKED (step 1 behaviour). Optional: confirm the buffered tap events survive (event ring) | |
 | 12 | Brownout backoff | Briefly dip the PSU so the board browns out ×2, then tap | Log `brownout resets: N, release blocked …ms after boot`; releases denied during the backoff window (doubling), taps still log | |
 | 13 | Reader unplugged | Pull the RC522 CS/SPI jumper while running | Log `reader 0 fault (health check) — probing`, red LED, door stays locked; replug → `reader 0 back online` within ~5 s and taps work again | |
-| 14 | Wi-Fi sync (opshub develop) | Provision the 4 NVS keys with the console (§4), wait one sync interval (default 60 min — lower `SYNC_INTERVAL_MIN` for the bench) | Session log: Wi-Fi up, SNTP, allow-list fetch (200 or 304), events uploaded; server sees `battery_mv` + `low_battery` on the envelope EVERY session (heartbeat with an empty ring) | |
+| 14 | Wi-Fi sync (opshub develop) | Provision the 4 NVS keys with the console (§4), wait one sync interval (default 60 min — lower `SYNC_INTERVAL_MIN` for the bench) | Session log: Wi-Fi up, SNTP, allow-list fetch (200 or 304), events uploaded, and one `sync: session ...` summary line per session (§4 "Reading the sync log"); server sees `battery_mv` + `low_battery` on the envelope EVERY session (heartbeat with an empty ring) | |
 | 15 | Read distance / placement | Move the card away/angle it | Record max stable distance (typically 0–3 cm) and any dead angles; RC522 antenna away from the servo wires | |
 
 Row 5 note: 7-byte-UID cards are *rejected by design* in this build. The

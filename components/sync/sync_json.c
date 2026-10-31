@@ -105,7 +105,7 @@ size_t sync_encode_event(const sync_event_t *ev, uint32_t seq, char *out, size_t
 }
 
 size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
-                            uint16_t battery_mv, bool low_battery,
+                            uint16_t battery_mv, bool low_battery, bool battery_fault,
                             const store_event_t *events, size_t n_events, char *out, size_t cap)
 {
     if (stream == NULL || out == NULL || (events == NULL && n_events > 0)) {
@@ -127,8 +127,13 @@ size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
     }
     emit_str(&e, "\",\"dropped\":");
     emit_u32(&e, dropped);
-    if (battery_mv != 0) { // 0 = no reading this session: omit BOTH fields —
-        // the server must not read an absent pack as 0 mV and alert
+    if (battery_fault) {
+        // The reading exists but cannot be a pack voltage (divider fault):
+        // never send an implausible battery_mv — the server must not reject
+        // the whole batch (round-3 bench finding) or show "34 V".
+        emit_str(&e, ",\"battery_fault\":true");
+    } else if (battery_mv != 0) { // 0 = no reading this session: omit BOTH
+        // fields — the server must not read an absent pack as 0 mV and alert
         emit_str(&e, ",\"battery_mv\":"); // (round-2 review item 1)
         emit_u32(&e, battery_mv);
         emit_str(&e, ",\"low_battery\":");

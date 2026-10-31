@@ -15,6 +15,37 @@ void test_divider_math(void)
     TEST_ASSERT_EQUAL_UINT32(0, power_battery_from_raw(600, 10, 0)); // divide-by-zero guard
 }
 
+void test_reading_plausibility_window(void)
+{
+    // The pack is 4.5-6.5 V; the configured window (Kconfig 3000-9000)
+    // absorbs divider and ADC tolerance. Bounds are inclusive.
+    TEST_ASSERT_TRUE(power_reading_plausible(4500, 3000, 9000));
+    TEST_ASSERT_TRUE(power_reading_plausible(6500, 3000, 9000));
+    TEST_ASSERT_TRUE(power_reading_plausible(3000, 3000, 9000));
+    TEST_ASSERT_TRUE(power_reading_plausible(9000, 3000, 9000));
+    TEST_ASSERT_TRUE(power_reading_plausible(0, 3000, 9000)); // no reading = unknown
+    // Round-3 bench: the divider was not wired and the tap floated at
+    // 33,9xx mV ("34 V") — implausible high.
+    TEST_ASSERT_FALSE(power_reading_plausible(33900, 3000, 9000));
+    TEST_ASSERT_FALSE(power_reading_plausible(9001, 3000, 9000));
+    // A shorted or half-wired divider reads far below the pack.
+    TEST_ASSERT_FALSE(power_reading_plausible(2999, 3000, 9000));
+    TEST_ASSERT_FALSE(power_reading_plausible(500, 3000, 9000));
+}
+
+void test_release_gate_treats_a_sensor_fault_like_low_battery(void)
+{
+    // Below the gate (cutoff 4.8 V + 0.2 V margin): deny, as before.
+    TEST_ASSERT_TRUE(power_release_blocked(4900, 4800, 200, 3000, 9000));
+    // An implausible reading must DENY (fail-secure), not sail through as
+    // "34 V" — the round-3 bench regression this arm exists for.
+    TEST_ASSERT_TRUE(power_release_blocked(33900, 4800, 200, 3000, 9000));
+    TEST_ASSERT_TRUE(power_release_blocked(500, 4800, 200, 3000, 9000));
+    // A healthy pack releases normally; no reading (0 mV) never locks out.
+    TEST_ASSERT_FALSE(power_release_blocked(5400, 4800, 200, 3000, 9000));
+    TEST_ASSERT_FALSE(power_release_blocked(0, 4800, 200, 3000, 9000));
+}
+
 void test_low_battery_threshold(void)
 {
     TEST_ASSERT_TRUE(power_is_low(4999, 5000)); // alert at ~5.0 V
@@ -61,6 +92,8 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_divider_math);
+    RUN_TEST(test_reading_plausibility_window);
+    RUN_TEST(test_release_gate_treats_a_sensor_fault_like_low_battery);
     RUN_TEST(test_low_battery_threshold);
     RUN_TEST(test_release_denied_below_cutoff_plus_margin);
     RUN_TEST(test_brownout_backoff_doubles_and_caps);

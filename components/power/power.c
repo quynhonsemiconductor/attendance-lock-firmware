@@ -14,9 +14,24 @@ bool power_is_low(uint32_t battery_mv, uint32_t low_threshold_mv)
     return battery_mv != 0 && battery_mv < low_threshold_mv;
 }
 
+bool power_reading_plausible(uint32_t battery_mv, uint32_t min_mv, uint32_t max_mv)
+{
+    if (battery_mv == 0) {
+        return true; // no reading at all is "unknown", not a fault
+    }
+    return battery_mv >= min_mv && battery_mv <= max_mv;
+}
+
 bool power_should_deny(uint32_t battery_mv, uint32_t cutoff_mv, uint32_t margin_mv)
 {
     return battery_mv != 0 && battery_mv < cutoff_mv + margin_mv;
+}
+
+bool power_release_blocked(uint32_t battery_mv, uint32_t cutoff_mv, uint32_t margin_mv,
+                           uint32_t min_mv, uint32_t max_mv)
+{
+    return power_should_deny(battery_mv, cutoff_mv, margin_mv) ||
+           !power_reading_plausible(battery_mv, min_mv, max_mv);
 }
 
 power_brownout_t power_brownout_on_reset(const power_brownout_t *prev, bool was_brownout)
