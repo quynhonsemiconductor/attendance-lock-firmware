@@ -116,6 +116,9 @@ bool sync_session_run(void)
         s_last = r;
         return false; // unprovisioned: nothing to do
     }
+    // Reader UID integrity since the previous session: reported even when
+    // this session fails, so a bad reader is visible from the log alone.
+    r.misreads = sync_port_take_misreads();
     sync_fail_t fail = { SYNC_STAGE_NONE, 0 };
     if (!sync_port_wifi_up(&fail)) {
         if (fail.stage == SYNC_STAGE_IP) {
@@ -271,9 +274,9 @@ bool sync_session_run(void)
             SYNC_LOGW("batch all-corrupt: cleared through seq=%u locally",
                       (unsigned)bad_max_seq);
         }
-        size_t body_len = sync_encode_envelope(stream, dropped, battery_mv, low_battery,
-                                               battery_fault, s_batch, n_good, s_body,
-                                               sizeof(s_body));
+        size_t body_len = sync_encode_envelope(stream, dropped, r.misreads, battery_mv,
+                                               low_battery, battery_fault, s_batch, n_good,
+                                               s_body, sizeof(s_body));
         if (body_len == 0) {
             ok = false;
             result_fail(&r, SYNC_STAGE_CONFIG, 0, 0, "events envelope too large");
@@ -414,10 +417,11 @@ size_t sync_format_summary(const sync_session_result_t *r, uint32_t consecutive_
     int n;
     if (r->ok) {
         n = snprintf(out, cap,
-                     "session ok%s allow-list=%s events=%u/%u next in %u s (backoff %u/5)",
+                     "session ok%s allow-list=%s events=%u/%u misreads=%u next in %u s "
+                     "(backoff %u/5)",
                      r->time_unsynced ? " (sntp: no time source)" : "", al,
-                     (unsigned)r->events_acked, (unsigned)r->events_sent, (unsigned)secs,
-                     (unsigned)backoff);
+                     (unsigned)r->events_acked, (unsigned)r->events_sent, (unsigned)r->misreads,
+                     (unsigned)secs, (unsigned)backoff);
     } else {
         char stage[24];
         if (r->fail_stage == SYNC_STAGE_HTTP && r->fail_http_status != 0) {
@@ -435,10 +439,10 @@ size_t sync_format_summary(const sync_session_result_t *r, uint32_t consecutive_
             detail_set(why, sizeof(why), r->fail_detail);
         }
         n = snprintf(out, cap,
-                     "session failed (%s: %s) allow-list=%s events=%u/%u next in %u s "
+                     "session failed (%s: %s) allow-list=%s events=%u/%u misreads=%u next in %u s "
                      "(backoff %u/5)",
                      stage, why, al, (unsigned)r->events_acked, (unsigned)r->events_sent,
-                     (unsigned)secs, (unsigned)backoff);
+                     (unsigned)r->misreads, (unsigned)secs, (unsigned)backoff);
     }
     if (n < 0 || (size_t)n >= cap) {
         out[0] = '\0';

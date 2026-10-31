@@ -90,6 +90,9 @@ typedef struct {
     long allow_list_status;  // HTTP status of the GET; 0 = never got one
     uint32_t events_sent;    // distinct events put in an envelope
     uint32_t events_acked;   // events the server acked this session
+    uint32_t misreads;       // UID reads the reader rejected since the last
+                             // session (BCC / confirm-read): a bad reader
+                             // is visible in the log and on the server
     bool time_unsynced;      // neither SNTP nor the Date header gave a time
 } sync_session_result_t;
 
@@ -99,7 +102,8 @@ void sync_session_result(sync_session_result_t *out);
 
 // Renders the one-line summary message (BENCH-TEST.md "Reading the sync
 // log"), e.g. "session failed (http 401: terminal token refused: check
-// `set token`) allow-list=401 events=0/0 next in 30 s (backoff 1/5)".
+// `set token`) allow-list=401 events=0/0 misreads=0 next in 30 s (backoff
+// 1/5)".
 // The leading `sync: ` in the monitor comes from the ESP log tag, so this
 // text is exactly the operator-facing line. consecutive_fails counts this
 // session (0 on success); the display caps at the 5 backoff steps. Returns
@@ -144,9 +148,12 @@ bool sync_decode_events_response(const char *body, size_t len, uint32_t *acked_t
 // battery_fault (round-3 bench finding: the divider floated at "34 V") OMITS
 // both battery fields and sends `"battery_fault":true` instead: the server
 // may ignore the flag, but it must never see an implausible voltage.
+// misreads (reader UID integrity, bench 2026-10-31) is an OPTIONAL field:
+// emitted only when non-zero, so a healthy session stays byte-identical to
+// the contract fixture; a server may ignore it (unknown fields are skipped).
 // dropped is clamped to SYNC_DROPPED_REPORT_MAX. Returns bytes written, or
 // 0 when out is too small (nothing is half-written).
-size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
+size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped, uint32_t misreads,
                             uint16_t battery_mv, bool low_battery, bool battery_fault,
                             const store_event_t *events, size_t n_events, char *out, size_t cap);
 

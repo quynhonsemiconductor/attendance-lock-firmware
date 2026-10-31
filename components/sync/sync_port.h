@@ -42,6 +42,11 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
                     long *status, char *resp, size_t cap, size_t *resp_len, char *etag,
                     size_t etag_cap, char *date, size_t date_cap, sync_fail_t *fail);
 
+// UID reads the reader rejected since the previous call (BCC mismatch or
+// confirm-read mismatch). The session reports the delta in its summary and
+// envelope, so a flaky reader is visible from the log and on the server.
+uint32_t sync_port_take_misreads(void);
+
 // 32 random bits (backoff jitter).
 uint32_t sync_port_random_u32(void);
 

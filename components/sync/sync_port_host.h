@@ -61,3 +61,6 @@ void sync_host_fail_wifi(sync_stage_t stage);
 // Stage + code a failed exchange reports (default: SYNC_STAGE_DNS, code 0 —
 // what an exhausted script models on the bench: resolve/connect failed).
 void sync_host_fail_http(sync_stage_t stage, int code);
+
+// Script the reader misreads the next session takes and reports.
+void sync_host_set_misreads(uint32_t misreads);

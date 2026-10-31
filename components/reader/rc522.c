@@ -5,6 +5,7 @@
 // timer regs, TxASK force-100% ASK, RxGain_max, REQA + anticoll + select,
 // antenna only on during the scan turn. UID-only: no MIFARE auth (§2.5).
 #include "reader/rc522.h"
+#include "reader/reader.h" // reader_bcc_ok / reader_uid_confirmed (host-tested)
 
 #include <string.h>
 
@@ -49,6 +50,7 @@
 #define COLL_POS_MASK 0x1F
 
 #define PICC_REQA 0x26
+#define PICC_WUPA 0x52 // wake-up: brings a HALTed card back for the confirm read
 #define PICC_ANTICOLL_CL1 0x93
 #define PICC_SELECT_CL1 0x93
 #define PICC_HALT 0x50
@@ -57,6 +59,36 @@
 static const char *TAG = "rc522";
 
 static spi_device_handle_t s_spi;
+
+// UID reads rejected as misreads (bench 2026-10-31: ghost UIDs reached
+// opshub as unknown cards). Monotonic; the sync port reports the delta.
+static uint32_t s_misreads;
+static int64_t s_last_misread_log_us;
+
+// Counts a rejected UID read and logs it at most once per 10 s: a flaky
+// reader can produce many per second, and the counter — not the log line —
+// is what the sync summary reports.
+static void misread_note(const rc522_conf_t *conf, const char *why, const uint8_t *raw4)
+{
+    s_misreads++;
+    int64_t now = esp_timer_get_time();
+    if (s_misreads == 1 || now - s_last_misread_log_us >= 10 * 1000 * 1000) {
+        s_last_misread_log_us = now;
+        if (raw4 != NULL) {
+            ESP_LOGW(TAG, "cs=%d: uid read rejected (%s) raw=%02X%02X%02X%02X total=%u",
+                     conf->cs_gpio, why, raw4[0], raw4[1], raw4[2], raw4[3],
+                     (unsigned)s_misreads);
+        } else {
+            ESP_LOGW(TAG, "cs=%d: uid read rejected (%s) total=%u", conf->cs_gpio, why,
+                     (unsigned)s_misreads);
+        }
+    }
+}
+
+uint32_t rc522_misread_count(void)
+{
+    return s_misreads;
+}
 
 // One SPI frame = one CS assertion. Without DMA the host moves at most its
 // 64-byte hardware buffer per transaction. Polling transmit: a frame is a
@@ -248,7 +280,8 @@ static bool select_cl1(const rc522_conf_t *conf, uint8_t *uid_cl1)
         size_t n = 0;
         if (known_bits >= 32) {
             uint8_t bcc = (uint8_t)(buf[2] ^ buf[3] ^ buf[4] ^ buf[5]);
-            if (bcc_received && buf[6] != bcc) {
+            if (bcc_received && !reader_bcc_ok(&buf[2], buf[6])) {
+                misread_note(conf, "bcc", &buf[2]);
                 return false; // corrupt anticoll reply: try again next poll
             }
             buf[6] = bcc;
@@ -375,11 +408,37 @@ bool rc522_healthy(const rc522_conf_t *conf)
     return v[1] == 0xA9;
 }
 
+// One read attempt while the field is up: <cmd> (REQA first, then WAKE-UP
+// after the first read HALTs the card) → anticoll + select → HALT. CRC is
+// off for the wake-up and anticoll phases; select_cl1 turns it on for
+// SELECT and HALT. True only when a card answered and its CL1 UID was read.
+static bool read_card_once(const rc522_conf_t *conf, uint8_t cmd, uint8_t uid[4])
+{
+    uint8_t atqa[2];
+    size_t n = 0;
+    write_reg(conf, REG_TX_MODE, 0x00);
+    write_reg(conf, REG_RX_MODE, 0x00);
+    // Several cards answer at once and their ATQAs clash: that is still
+    // "a card is here" (miguelbalboa's PICC_IsNewCardPresent).
+    xfer_t r = transceive(conf, &cmd, 1, 0x07, atqa, sizeof(atqa), &n);
+    if (r == XFER_NONE || (r == XFER_OK && n != sizeof(atqa))) {
+        return false; // no card in the field — the common case
+    }
+    if (!select_cl1(conf, uid)) {
+        return false; // bad frame, cascade UID or card gone: next poll
+    }
+    uint8_t halt[2] = { PICC_HALT, 0x00 };
+    uint8_t ignored[3];
+    (void)transceive(conf, halt, sizeof(halt), 0x00, ignored, sizeof(ignored), &n);
+    return true;
+}
+
 // One poll cycle (battery/wake decisions 2026-10-25): wake from hard
 // power-down — which self-resets the chip, so the FULL init re-runs every
-// poll — antenna on, settle, REQIDL + anticoll + select + halt, antenna
-// off, power down again. 4-byte UIDs only: a cascade tag (0x88) in the CL1
-// UID means a 7/10-byte card — rejected until CL2 is implemented.
+// poll — antenna on, settle, then TWO independent reads whose UIDs must
+// match (confirm-read), antenna off, power down again. 4-byte UIDs only: a
+// cascade tag (0x88) in the CL1 UID means a 7/10-byte card — rejected until
+// CL2 is implemented.
 rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len)
 {
     if (conf->rst_gpio < 0) {
@@ -407,26 +466,26 @@ rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint
     (void)spi_device_acquire_bus(s_spi, portMAX_DELAY);
 
     rc522_poll_result_t result = RC522_NONE;
-    uint8_t reqa = PICC_REQA;
-    uint8_t atqa[2];
-    size_t n = 0;
-    write_reg(conf, REG_TX_MODE, 0x00); // CRC off for REQIDL + anticoll
-    write_reg(conf, REG_RX_MODE, 0x00);
-    // Several cards answer REQA at once and their ATQAs clash: that is
-    // still "a card is here" (miguelbalboa's PICC_IsNewCardPresent).
-    xfer_t r = transceive(conf, &reqa, 1, 0x07, atqa, sizeof(atqa), &n);
-    if (r == XFER_NONE || (r == XFER_OK && n != sizeof(atqa))) {
+    uint8_t first[4];
+    uint8_t second[4];
+    if (!read_card_once(conf, PICC_REQA, first)) {
         goto out; // no card in the field — the common case
     }
-    uint8_t uid_cl1[4];
-    if (!select_cl1(conf, uid_cl1)) {
-        goto out; // bad frame, cascade UID or card gone: try again next poll
+    // Confirm-read (bench 2026-10-31: reader 1 returned three wrong UIDs for
+    // three real cards right after boot). The HALT above parked the card;
+    // WAKE-UP brings it back for a second, fully independent read. Only an
+    // identical UID is a tap — a one-off corrupted read becomes a counted
+    // misread instead of an "unknown card" event. A vanished card (second
+    // read fails) is simply no tap.
+    if (!read_card_once(conf, PICC_WUPA, second)) {
+        goto out;
     }
-    uint8_t halt[2] = { PICC_HALT, 0x00 };
-    uint8_t ignored[3];
-    (void)transceive(conf, halt, sizeof(halt), 0x00, ignored, sizeof(ignored), &n);
+    if (!reader_uid_confirmed(first, second, 4)) {
+        misread_note(conf, "confirm", first);
+        goto out;
+    }
     if (uid != NULL && uid_len != NULL && *uid_len >= 4) {
-        memcpy(uid, uid_cl1, 4);
+        memcpy(uid, first, 4);
         *uid_len = 4;
     }
     result = RC522_CARD;

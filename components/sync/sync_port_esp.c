@@ -22,6 +22,7 @@
 
 #include "power/power.h"
 #include "power/power_calc.h"
+#include "reader/reader.h"
 #include "sync/sync.h"
 
 static const char *TAG = "sync";
@@ -376,6 +377,17 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     }
     esp_http_client_cleanup(c);
     return ok;
+}
+
+uint32_t sync_port_take_misreads(void)
+{
+    // Reader counter is monotonic since boot; the session wants the delta
+    // since the previous session (the envelope field is per session).
+    static uint32_t last;
+    uint32_t total = reader_misread_count();
+    uint32_t delta = total - last;
+    last = total;
+    return delta;
 }
 
 uint32_t sync_port_random_u32(void)

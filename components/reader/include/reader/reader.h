@@ -37,6 +37,21 @@ void reader_start(void (*on_card)(const reader_card_t *card),
 bool reader_accept(uint8_t *state, size_t state_cap, const reader_card_t *card, uint32_t now_ms,
                    uint32_t debounce_ms, uint32_t cross_read_ms);
 
+// ISO 14443-3 BCC over the four CL1 UID bytes. Host-testable: a corrupted
+// anticoll reply (loose SPI/antenna) is rejected before it can become a tap
+// (bench 2026-10-31: ghost UIDs reached opshub as unknown cards).
+bool reader_bcc_ok(const uint8_t uid[4], uint8_t bcc);
+
+// Confirm-read: two INDEPENDENT reads of the card must return the same
+// 4-byte UID. One corrupted pass is not a tap; the driver reads each card
+// twice inside one poll (REQA then WUPA after the first HALT) and only the
+// second, identical read reaches this check.
+bool reader_uid_confirmed(const uint8_t *first, const uint8_t *second, uint8_t uid_len);
+
+// UID reads rejected by the driver since boot (BCC mismatch, confirm-read
+// mismatch). Monotonic; the sync port reports the per-session delta.
+uint32_t reader_misread_count(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -258,7 +258,7 @@ void test_encode_envelope_matches_fixture(void)
     uint8_t stream[16] = { 0x6f, 0x1a, 0x2b, 0x3c, 0x00, 0x00, 0x40, 0x00,
                            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
     char out[1024];
-    size_t n = sync_encode_envelope(stream, 0, 5400, false, false, &ev, 1, out, sizeof(out));
+    size_t n = sync_encode_envelope(stream, 0, 0, 5400, false, false, &ev, 1, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     char want[1024];
     strcpy(want, fixture("events-request.json"));
@@ -270,7 +270,7 @@ void test_encode_envelope_clamp_and_battery_omission_rules(void)
 {
     uint8_t stream[16] = { 0 };
     char out[256];
-    size_t n = sync_encode_envelope(stream, 100001, 4900, true, false, NULL, 0, out, sizeof(out));
+    size_t n = sync_encode_envelope(stream, 100001, 0, 4900, true, false, NULL, 0, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_TRUE(strstr(out, "\"dropped\":100000") != NULL); // server cap
     TEST_ASSERT_TRUE(strstr(out, "\"battery_mv\":4900") != NULL); // empty batch:
@@ -278,7 +278,7 @@ void test_encode_envelope_clamp_and_battery_omission_rules(void)
     TEST_ASSERT_TRUE(strstr(out, "\"events\":[]") != NULL);
     // No reading (battery_mv == 0): BOTH fields are omitted — the server
     // must not read an absent pack as 0 mV (round-2 review item 1).
-    n = sync_encode_envelope(stream, 0, 0, false, false, NULL, 0, out, sizeof(out));
+    n = sync_encode_envelope(stream, 0, 0, 0, false, false, NULL, 0, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_NULL(strstr(out, "battery_mv"));
     TEST_ASSERT_NULL(strstr(out, "low_battery"));
@@ -292,7 +292,7 @@ void test_encode_envelope_battery_fault_omits_voltage(void)
     // an implausible battery_mv on the wire; the optional flag rides instead.
     uint8_t stream[16] = { 0 };
     char out[256];
-    size_t n = sync_encode_envelope(stream, 0, 0, false, true, NULL, 0, out, sizeof(out));
+    size_t n = sync_encode_envelope(stream, 0, 0, 0, false, true, NULL, 0, out, sizeof(out));
     TEST_ASSERT_TRUE(n > 0);
     TEST_ASSERT_NULL(strstr(out, "battery_mv"));
     TEST_ASSERT_NULL(strstr(out, "low_battery"));
@@ -717,8 +717,8 @@ void test_summary_ok_session(void)
     TEST_ASSERT_TRUE(r.ok);
     char line[320];
     TEST_ASSERT_TRUE(sync_format_summary(&r, 0, 3600000, line, sizeof(line)) > 0);
-    TEST_ASSERT_EQUAL_STRING("session ok allow-list=304 events=0/0 next in 3600 s (backoff 0/5)",
-                             line);
+    TEST_ASSERT_EQUAL_STRING(
+        "session ok allow-list=304 events=0/0 misreads=0 next in 3600 s (backoff 0/5)", line);
 }
 
 void test_summary_ok_without_time_source_is_visible(void)
@@ -849,6 +849,33 @@ void test_summary_counts_events_acked_of_sent(void)
     TEST_ASSERT_TRUE(strstr(line, "events=3/3") != NULL);
 }
 
+void test_summary_and_envelope_report_reader_misreads(void)
+{
+    // Bench 2026-10-31: a flaky reader must be visible from the sync log and
+    // on the server. The port reports the per-session delta; the envelope
+    // carries it as an optional field (omitted when 0 — see the heartbeat
+    // test above), the summary always shows it.
+    sync_host_set_misreads(2);
+    sync_host_enqueue(304, NULL, NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    sync_session_result_t r;
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL_UINT32(2, r.misreads);
+    TEST_ASSERT_TRUE(strstr(sync_host_last_request.body, "\"misreads\":2") != NULL);
+    char line[320];
+    TEST_ASSERT_TRUE(sync_format_summary(&r, 0, 3600000, line, sizeof(line)) > 0);
+    TEST_ASSERT_TRUE(strstr(line, "misreads=2") != NULL);
+    // The delta is taken once: the next session with no new misreads
+    // reports 0 and omits the field again.
+    sync_host_enqueue(304, NULL, NULL, "Wed, 23 Oct 2026 08:01:02 GMT");
+    sync_host_enqueue(200, "{\"acked_through\":0,\"rejected\":[]}", NULL, NULL);
+    TEST_ASSERT_TRUE(sync_session_run());
+    sync_session_result(&r);
+    TEST_ASSERT_EQUAL_UINT32(0, r.misreads);
+    TEST_ASSERT_NULL(strstr(sync_host_last_request.body, "misreads"));
+}
+
 void test_summary_backoff_display_caps_at_five(void)
 {
     TEST_ASSERT_FALSE(sync_session_run()); // dns failure
@@ -928,6 +955,7 @@ int main(void)
     RUN_TEST(test_summary_unprovisioned_says_which_commands);
     RUN_TEST(test_summary_422_points_at_the_envelope);
     RUN_TEST(test_summary_counts_events_acked_of_sent);
+    RUN_TEST(test_summary_and_envelope_report_reader_misreads);
     RUN_TEST(test_summary_backoff_display_caps_at_five);
     RUN_TEST(test_next_delay_interval_when_clean);
     RUN_TEST(test_next_delay_backoff_grows_and_caps);
