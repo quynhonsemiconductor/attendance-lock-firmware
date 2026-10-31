@@ -93,6 +93,11 @@ static void poll_loop(void *arg)
     }
 }
 
+uint32_t reader_misread_count(void)
+{
+    return rc522_misread_count();
+}
+
 void reader_start(void (*on_card)(const reader_card_t *card),
                   void (*on_fault)(uint8_t reader))
 {

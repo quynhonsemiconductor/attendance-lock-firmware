@@ -26,6 +26,9 @@ static uint16_t s_battery_mv = 5400;
 static bool s_battery_low;
 static bool s_battery_fault;
 
+// Scripted reader misreads for one session (taken, then cleared).
+static uint32_t s_misreads;
+
 // Scripted failure reporting (see sync_port_host.h).
 static sync_stage_t s_wifi_fail_stage = SYNC_STAGE_NONE;
 static sync_stage_t s_http_fail_stage = SYNC_STAGE_DNS;
@@ -141,6 +144,13 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     return true;
 }
 
+uint32_t sync_port_take_misreads(void)
+{
+    uint32_t n = s_misreads;
+    s_misreads = 0; // delta semantics, like the device port
+    return n;
+}
+
 uint32_t sync_port_random_u32(void)
 {
     return 42; // deterministic jitter in tests
@@ -168,6 +178,7 @@ void sync_host_reset(void)
     s_battery_mv = 5400;
     s_battery_low = false;
     s_battery_fault = false;
+    s_misreads = 0;
     s_wifi_fail_stage = SYNC_STAGE_NONE;
     s_http_fail_stage = SYNC_STAGE_DNS;
     s_http_fail_code = 0;
@@ -207,4 +218,9 @@ void sync_host_fail_http(sync_stage_t stage, int code)
 {
     s_http_fail_stage = stage;
     s_http_fail_code = code;
+}
+
+void sync_host_set_misreads(uint32_t misreads)
+{
+    s_misreads = misreads;
 }

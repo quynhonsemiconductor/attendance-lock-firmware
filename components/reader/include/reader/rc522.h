@@ -37,11 +37,17 @@ typedef enum {
 } rc522_poll_result_t;
 
 // One poll: wake from hard power-down (self-resets the chip — the init
-// re-runs), REQIDL, anticoll, select, halt. "No card" and "dead reader"
-// are DIFFERENT answers: only a failed health check (VersionReg) is a
-// fault — an empty field is a normal poll. 7/10-byte cascade UIDs are
-// rejected (skipped) until CL2 exists.
+// re-runs), then read the card TWICE — REQIDL/anticoll/select/halt, then
+// WAKE-UP/anticoll/select/halt — and accept the UID only when both reads
+// agree (confirm-read; a single corrupted pass is not a tap). "No card" and
+// "dead reader" are DIFFERENT answers: only a failed health check
+// (VersionReg) is a fault — an empty field is a normal poll. 7/10-byte
+// cascade UIDs are rejected (skipped) until CL2 exists.
 rc522_poll_result_t rc522_wake_poll(const rc522_conf_t *conf, uint8_t *uid, uint8_t *uid_len);
+
+// UID reads rejected since boot (BCC mismatch / confirm-read mismatch).
+// Used by reader_misread_count() and reported in the sync summary.
+uint32_t rc522_misread_count(void);
 
 // Hard power-down between polls (NRSTPD low; battery/wake decisions
 // 2026-10-25).

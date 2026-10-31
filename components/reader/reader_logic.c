@@ -24,6 +24,24 @@ size_t reader_state_size(void)
     return sizeof(reader_seen_t) * READER_MAX_TRACKED;
 }
 
+bool reader_bcc_ok(const uint8_t uid[4], uint8_t bcc)
+{
+    if (uid == NULL) {
+        return false;
+    }
+    return (uint8_t)(uid[0] ^ uid[1] ^ uid[2] ^ uid[3]) == bcc;
+}
+
+bool reader_uid_confirmed(const uint8_t *first, const uint8_t *second, uint8_t uid_len)
+{
+    // Only the 4-byte CL1 UID exists in this build (7/10-byte cards are
+    // skipped), so a different length can never confirm.
+    if (first == NULL || second == NULL || uid_len != 4) {
+        return false;
+    }
+    return memcmp(first, second, uid_len) == 0;
+}
+
 bool reader_accept(uint8_t *state, size_t state_cap, const reader_card_t *card, uint32_t now_ms,
                    uint32_t debounce_ms, uint32_t cross_read_ms)
 {

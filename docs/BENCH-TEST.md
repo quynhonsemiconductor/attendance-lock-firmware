@@ -118,12 +118,13 @@ Every session ends with one INFO line, success included, so the cadence is
 visible without the server log:
 
 ```
-sync: session ok|failed (<stage>: <detail>) allow-list=<200|304|status|none> events=<acked>/<sent> next in <s> s (backoff <n>/5)
+sync: session ok|failed (<stage>: <detail>) allow-list=<200|304|status|none> events=<acked>/<sent> misreads=<n> next in <s> s (backoff <n>/5)
 ```
 
 | Line | Meaning | Fix |
 |---|---|---|
-| `session ok allow-list=200 events=0/0 next in 3600 s (backoff 0/5)` | Clean session: allow-list fetched, empty-ring heartbeat sent. | None. |
+| `session ok allow-list=200 events=0/0 misreads=0 next in 3600 s (backoff 0/5)` | Clean session: allow-list fetched, empty-ring heartbeat sent, reader UID reads all clean. | None. |
+| `misreads=5` | The reader rejected 5 UID reads since the last session (a BCC mismatch, or the confirm-read saw two different UIDs). Rejected reads are NOT taps and send no event; the warning `uid read rejected (bcc|confirm)` is rate-limited to one per 10 s. | A few under noise is normal; a stream means a loose SPI/antenna wire (MISO/CS), a card too far away, or two cards in the field. Check the §2 wiring. |
 | `allow-list=304` | Cached list unchanged (the ETag matched). | None. |
 | `allow-list=none` | The GET never reached an HTTP status (transport failed). | Read the `(<stage>: ...)` part. |
 | `events=3/3` | Server acked 3 of the 3 distinct events sent this session. | None. |

@@ -104,7 +104,7 @@ size_t sync_encode_event(const sync_event_t *ev, uint32_t seq, char *out, size_t
     return e.ok ? e.len : 0;
 }
 
-size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
+size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped, uint32_t misreads,
                             uint16_t battery_mv, bool low_battery, bool battery_fault,
                             const store_event_t *events, size_t n_events, char *out, size_t cap)
 {
@@ -127,6 +127,13 @@ size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
     }
     emit_str(&e, "\",\"dropped\":");
     emit_u32(&e, dropped);
+    if (misreads != 0) {
+        // Optional (unknown-field-tolerant server): reader UID integrity
+        // for this session. Omitted when 0 so a healthy heartbeat keeps the
+        // contract fixture's exact bytes.
+        emit_str(&e, ",\"misreads\":");
+        emit_u32(&e, misreads);
+    }
     if (battery_fault) {
         // The reading exists but cannot be a pack voltage (divider fault):
         // never send an implausible battery_mv — the server must not reject
