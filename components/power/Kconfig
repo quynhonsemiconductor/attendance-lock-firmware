@@ -16,6 +16,23 @@ config POWER_BATTERY_DIV_DIV
     int "Divider denominator (pin mV × MUL / DIV = pack mV)"
     default 1
 
+config POWER_BATTERY_MIN_MV
+    int "Plausible reading: lower bound (pack mV)"
+    default 3000
+    help
+        A reading below this is a sensor fault (open/shorted divider), not
+        a pack level. BENCH-TEST.md: the pack is 4.5-6.5 V and the divider
+        is 11:1, so the window is widened to 3.0-9.0 V to absorb ADC and
+        divider tolerance; a floating tap reads full scale (~34 V).
+
+config POWER_BATTERY_MAX_MV
+    int "Plausible reading: upper bound (pack mV)"
+    default 9000
+    help
+        A reading above this is a sensor fault (divider not wired, GPIO
+        floating near full scale). Such a reading is never sent as
+        battery_mv and never lets the release gate pass.
+
 config POWER_BATTERY_LOW_MV
     int "Low-battery threshold (pack mV)"
     default 5000

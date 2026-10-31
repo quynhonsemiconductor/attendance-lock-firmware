@@ -24,6 +24,12 @@ int sync_host_post_count;
 // Scripted battery reading for the envelope (sent every session).
 static uint16_t s_battery_mv = 5400;
 static bool s_battery_low;
+static bool s_battery_fault;
+
+// Scripted failure reporting (see sync_port_host.h).
+static sync_stage_t s_wifi_fail_stage = SYNC_STAGE_NONE;
+static sync_stage_t s_http_fail_stage = SYNC_STAGE_DNS;
+static int s_http_fail_code;
 
 // Scripted responses, consumed in order; an empty script = transport failure.
 // A drained session (GET + up to N batches) needs one slot per exchange.
@@ -42,8 +48,18 @@ bool sync_port_creds(char *url, size_t url_cap, char *token, size_t token_cap)
     return true;
 }
 
-bool sync_port_wifi_up(void)
+bool sync_port_wifi_up(sync_fail_t *fail)
 {
+    if (fail != NULL) {
+        fail->stage = SYNC_STAGE_WIFI;
+        fail->code = 0;
+    }
+    if (s_wifi_fail_stage != SYNC_STAGE_NONE) {
+        if (fail != NULL) {
+            fail->stage = s_wifi_fail_stage;
+        }
+        return false; // scripted radio failure
+    }
     if (wifi_up) {
         return false; // double-up = failure, like a real radio stack
     }
@@ -55,16 +71,27 @@ void sync_port_wifi_down(void)
     wifi_up = false;
 }
 
-void sync_port_battery(uint16_t *battery_mv, bool *low_battery)
+void sync_port_battery(uint16_t *battery_mv, bool *low_battery, bool *fault)
 {
     *battery_mv = s_battery_mv;
     *low_battery = s_battery_low;
+    *fault = s_battery_fault;
+}
+
+// Every transport failure in this port reports the scripted stage/code.
+static bool http_transport_fail(sync_fail_t *fail)
+{
+    if (fail != NULL) {
+        fail->stage = s_http_fail_stage;
+        fail->code = s_http_fail_code;
+    }
+    return false;
 }
 
 bool sync_port_http(const char *method, const char *url, const char *path, const char *token,
                     const char *if_none_match, const char *body, size_t body_len,
                     long *status, char *resp, size_t cap, size_t *resp_len, char *etag,
-                    size_t etag_cap, char *date, size_t date_cap)
+                    size_t etag_cap, char *date, size_t date_cap, sync_fail_t *fail)
 {
     memset(&sync_host_last_request, 0, sizeof(sync_host_last_request));
     if (strcmp(method, "POST") == 0) {
@@ -86,7 +113,7 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
         sync_host_first_post = sync_host_last_request; // post_count was just
     }                                       // incremented to 1 by the first POST
     if (script_pos >= script_len) {
-        return false; // scripted transport exhausted = transport failure
+        return http_transport_fail(fail); // scripted transport exhausted
     }
     sync_port_resp_t r = script[script_pos++];
     *status = r.status;
@@ -94,8 +121,13 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     if (resp != NULL && r.body != NULL) {
         size_t n = strlen(r.body);
         if (n >= cap) {
-            return false; // same semantics as the device port: an oversized
-                          // body is a transport failure, never a truncated 200
+            // same semantics as the device port: an oversized body is a
+            // transport failure, never a truncated 200
+            if (fail != NULL) {
+                fail->stage = SYNC_STAGE_HTTP;
+                fail->code = 0;
+            }
+            return false;
         }
         memcpy(resp, r.body, n);
         *resp_len = n;
@@ -135,6 +167,10 @@ void sync_host_reset(void)
     sync_host_post_count = 0;
     s_battery_mv = 5400;
     s_battery_low = false;
+    s_battery_fault = false;
+    s_wifi_fail_stage = SYNC_STAGE_NONE;
+    s_http_fail_stage = SYNC_STAGE_DNS;
+    s_http_fail_code = 0;
     provisioned = true;
     wifi_up = false;
 }
@@ -155,4 +191,20 @@ void sync_host_set_battery(uint16_t battery_mv, bool low_battery)
 {
     s_battery_mv = battery_mv;
     s_battery_low = low_battery;
+}
+
+void sync_host_set_battery_fault(bool fault)
+{
+    s_battery_fault = fault;
+}
+
+void sync_host_fail_wifi(sync_stage_t stage)
+{
+    s_wifi_fail_stage = stage;
+}
+
+void sync_host_fail_http(sync_stage_t stage, int code)
+{
+    s_http_fail_stage = stage;
+    s_http_fail_code = code;
 }

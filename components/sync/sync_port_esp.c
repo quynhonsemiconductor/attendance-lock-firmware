@@ -102,14 +102,24 @@ static bool read_wifi_creds(char *ssid, size_t ssid_cap, char *pass, size_t pass
     return e1 == ESP_OK && e2 == ESP_OK && ssid[0] != '\0';
 }
 
-bool sync_port_wifi_up(void)
+bool sync_port_wifi_up(sync_fail_t *fail)
 {
+    if (fail != NULL) {
+        fail->stage = SYNC_STAGE_WIFI; // steps below override the step
+        fail->code = 0;
+    }
     if (!nvs_ready()) {
+        if (fail != NULL) {
+            fail->stage = SYNC_STAGE_CONFIG;
+        }
         return false;
     }
     char ssid[33], pass[64];
     if (!read_wifi_creds(ssid, sizeof(ssid), pass, sizeof(pass))) {
         ESP_LOGW(TAG, "no wifi credentials provisioned");
+        if (fail != NULL) {
+            fail->stage = SYNC_STAGE_CONFIG;
+        }
         return false;
     }
     if (!s_netif_inited) {
@@ -170,6 +180,9 @@ bool sync_port_wifi_up(void)
                                            pdMS_TO_TICKS(15000));
     if ((bits & WIFI_CONNECTED_BIT) == 0) {
         ESP_LOGW(TAG, "wifi: no IP within 15 s");
+        if (fail != NULL) {
+            fail->stage = SYNC_STAGE_IP; // associated (or not) but no IP
+        }
         sync_port_wifi_down();
         return false;
     }
@@ -184,14 +197,27 @@ void sync_port_wifi_down(void)
     esp_wifi_stop();
 }
 
-void sync_port_battery(uint16_t *battery_mv, bool *low_battery)
+void sync_port_battery(uint16_t *battery_mv, bool *low_battery, bool *fault)
 {
     uint32_t mv = power_battery_mv(); // averaged, servo-idle reading
+    // Round-3 bench finding: an unwired divider floats the tap near full
+    // scale (33,9xx mV). Never report that as a pack voltage — the server
+    // rejected every batch with 422.
+    if (!power_reading_plausible(mv, CONFIG_POWER_BATTERY_MIN_MV,
+                                 CONFIG_POWER_BATTERY_MAX_MV)) {
+        ESP_LOGW(TAG, "battery reading implausible (%u mV): divider wiring?",
+                 (unsigned)mv);
+        *battery_mv = 0;
+        *low_battery = false;
+        *fault = true;
+        return;
+    }
     if (mv > 0xFFFF) {
         mv = 0xFFFF;
     }
     *battery_mv = (uint16_t)mv;
     *low_battery = power_is_low(mv, CONFIG_POWER_BATTERY_LOW_MV);
+    *fault = false;
 }
 
 // What the HTTP event handler captures from one exchange. The body goes
@@ -242,10 +268,15 @@ static esp_err_t http_event_cb(esp_http_client_event_t *evt)
 bool sync_port_http(const char *method, const char *url, const char *path, const char *token,
                     const char *if_none_match, const char *body, size_t body_len,
                     long *status, char *resp, size_t cap, size_t *resp_len, char *etag,
-                    size_t etag_cap, char *date, size_t date_cap)
+                    size_t etag_cap, char *date, size_t date_cap, sync_fail_t *fail)
 {
+    if (fail != NULL) {
+        fail->stage = SYNC_STAGE_CONFIG; // until the exchange starts
+        fail->code = 0;
+    }
     char full[192];
     if (snprintf(full, sizeof(full), "%s%s", url, path) >= (int)sizeof(full)) {
+        ESP_LOGW(TAG, "url too long for the request buffer");
         return false;
     }
     http_capture_t capture = {
@@ -269,6 +300,7 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (c == NULL) {
+        ESP_LOGW(TAG, "http client init failed");
         return false;
     }
     char ua[64];
@@ -292,21 +324,54 @@ bool sync_port_http(const char *method, const char *url, const char *path, const
     bool ok = false;
     esp_err_t e = esp_http_client_perform(c);
     if (e == ESP_OK) {
+        long code = (long)esp_http_client_get_status_code(c);
         if (capture.body.overflow) {
             // Same rule as the host port: an oversized body is a transport
             // failure, never a silently truncated 200 (a truncated
             // allow-list would freeze revocations).
             ESP_LOGW(TAG, "response body over %u bytes: failing, not truncating",
                      (unsigned)(cap - 1));
+            if (fail != NULL) {
+                fail->stage = SYNC_STAGE_HTTP;
+                fail->code = 0;
+            }
         } else {
-            *status = (long)esp_http_client_get_status_code(c);
+            *status = code;
             if (resp != NULL) {
                 resp[capture.body.len] = '\0';
                 *resp_len = capture.body.len;
             } else {
                 *resp_len = 0;
             }
+            if (fail != NULL) {
+                fail->stage = SYNC_STAGE_NONE;
+                fail->code = 0;
+            }
             ok = true;
+        }
+    } else {
+        // The summary names the stage: esp-tls keeps its last error on the
+        // transport's error handle, so a handshake/certificate failure is
+        // distinguishable from resolve/connect (both of which arrive as
+        // ESP_ERR_HTTP_CONNECT; round-3 bench: the URL typo showed only
+        // "sock < 0>"). tls_code != 0 means a real TLS-level error; a TCP
+        // connect timeout sets the esp-tls last_error but no mbedtls code.
+        int tls_code = 0, tls_flags = 0;
+        esp_err_t tls_err = ESP_OK;
+        if (strncasecmp(url, "https://", 8) == 0) {
+            tls_err = esp_http_client_get_and_clear_last_tls_error(c, &tls_code, &tls_flags);
+        }
+        int socket_errno = esp_http_client_get_errno(c);
+        ESP_LOGW(TAG, "%s %s failed: %s (0x%x), tls 0x%x, errno %d", method, path,
+                 esp_err_to_name(e), (unsigned)e, (unsigned)tls_code, socket_errno);
+        if (fail != NULL) {
+            if (tls_err != ESP_OK && tls_code != 0) {
+                fail->stage = SYNC_STAGE_TLS;
+                fail->code = (int)tls_err;
+            } else {
+                fail->stage = SYNC_STAGE_DNS;
+                fail->code = socket_errno != 0 ? socket_errno : (int)e;
+            }
         }
     }
     esp_http_client_cleanup(c);
@@ -330,7 +395,18 @@ static void sync_task(void *arg)
     for (;;) {
         bool ok = sync_session_run();
         fails = ok ? 0 : fails + 1;
-        vTaskDelay(pdMS_TO_TICKS(sync_next_delay_ms(ok, fails)));
+        uint32_t delay_ms = sync_next_delay_ms(ok, fails);
+        // One summary line per session at INFO, success included: the bench
+        // operator reads WHY a session failed and WHEN the next one runs
+        // without the server log (round-3 bench finding). The `sync: `
+        // prefix in the monitor is this log tag.
+        sync_session_result_t res;
+        sync_session_result(&res);
+        char line[320];
+        if (sync_format_summary(&res, fails, delay_ms, line, sizeof(line)) > 0) {
+            ESP_LOGI(TAG, "%s", line);
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 

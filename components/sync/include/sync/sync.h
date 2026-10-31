@@ -54,6 +54,59 @@ void sync_init(void);
 // directly against a scripted transport.
 bool sync_session_run(void);
 
+// --- session outcome (the bench summary line) --------------------------
+
+// Where a session stopped, in the order the session meets the stages
+// (BENCH-TEST.md "Reading the sync log"). ESP-IDF reports DNS and TCP
+// connect failures alike (ESP_ERR_HTTP_CONNECT), so SYNC_STAGE_DNS covers
+// both: a typo'd `set url` is the bench case this exists for.
+typedef enum {
+    SYNC_STAGE_NONE = 0, // no failure
+    SYNC_STAGE_CONFIG,   // unprovisioned or a local request-setup error
+    SYNC_STAGE_WIFI,     // the station did not connect
+    SYNC_STAGE_IP,       // associated but no IP (DHCP)
+    SYNC_STAGE_SNTP,     // no time source at all (SNTP and Date failed)
+    SYNC_STAGE_DNS,      // cannot resolve/connect
+    SYNC_STAGE_TLS,      // TLS handshake or certificate
+    SYNC_STAGE_HTTP,     // an HTTP status the session could not use
+} sync_stage_t;
+
+// A platform transport failure: the stage it stopped at + the platform code
+// (esp_err_t / esp-tls), 0 when the platform has no better number.
+typedef struct {
+    sync_stage_t stage;
+    int code;
+} sync_fail_t;
+
+// What happened in the last session. Rendered once per session at INFO so a
+// bench operator can read the cadence and the first failure without
+// cross-referencing the server log.
+typedef struct {
+    bool ok;
+    sync_stage_t fail_stage; // SYNC_STAGE_NONE when ok
+    long fail_http_status;   // SYNC_STAGE_HTTP only
+    int fail_code;           // platform code behind fail_stage (0 = none)
+    char fail_detail[96];    // short human explanation; "" when ok
+    long allow_list_status;  // HTTP status of the GET; 0 = never got one
+    uint32_t events_sent;    // distinct events put in an envelope
+    uint32_t events_acked;   // events the server acked this session
+    bool time_unsynced;      // neither SNTP nor the Date header gave a time
+} sync_session_result_t;
+
+// Fills out with the result of the last sync_session_run() (the sync task
+// owns the session; host tests call this right after driving one).
+void sync_session_result(sync_session_result_t *out);
+
+// Renders the one-line summary message (BENCH-TEST.md "Reading the sync
+// log"), e.g. "session failed (http 401: terminal token refused: check
+// `set token`) allow-list=401 events=0/0 next in 30 s (backoff 1/5)".
+// The leading `sync: ` in the monitor comes from the ESP log tag, so this
+// text is exactly the operator-facing line. consecutive_fails counts this
+// session (0 on success); the display caps at the 5 backoff steps. Returns
+// the message length, or 0 when out is too small.
+size_t sync_format_summary(const sync_session_result_t *r, uint32_t consecutive_fails,
+                           uint32_t next_delay_ms, char *out, size_t cap);
+
 // Delay until the next session in ms: the configured interval (Kconfig,
 // default 30 min) when clean, otherwise exponential backoff + jitter.
 // Deep sleep replaces this delay once the main loop arms it (PR 4).
@@ -88,10 +141,13 @@ bool sync_decode_events_response(const char *body, size_t len, uint32_t *acked_t
 // still a heartbeat that refreshes the server's terminal TTL and battery
 // badge. With NO reading (battery_mv == 0) BOTH fields are omitted — the
 // server must not read an absent pack as 0 mV (round-2 review item 1).
+// battery_fault (round-3 bench finding: the divider floated at "34 V") OMITS
+// both battery fields and sends `"battery_fault":true` instead: the server
+// may ignore the flag, but it must never see an implausible voltage.
 // dropped is clamped to SYNC_DROPPED_REPORT_MAX. Returns bytes written, or
 // 0 when out is too small (nothing is half-written).
 size_t sync_encode_envelope(const uint8_t stream[16], uint32_t dropped,
-                            uint16_t battery_mv, bool low_battery,
+                            uint16_t battery_mv, bool low_battery, bool battery_fault,
                             const store_event_t *events, size_t n_events, char *out, size_t cap);
 
 // Bounded accumulator for a streamed response body (round-2 review item 4):

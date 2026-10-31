@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sync/sync.h" // sync_stage_t (scripted failure stages)
+
 typedef struct {
     long status;
     const char *body;
@@ -47,3 +49,15 @@ void sync_host_set_provisioned(bool on);
 
 // Script the battery reading the next session reports in its envelope.
 void sync_host_set_battery(uint16_t battery_mv, bool low_battery);
+
+// Script the battery sensor-fault flag (envelope: battery_fault, no
+// battery_mv).
+void sync_host_set_battery_fault(bool fault);
+
+// Script a radio failure: the next sync_port_wifi_up reports this stage
+// (SYNC_STAGE_WIFI or SYNC_STAGE_IP).
+void sync_host_fail_wifi(sync_stage_t stage);
+
+// Stage + code a failed exchange reports (default: SYNC_STAGE_DNS, code 0 —
+// what an exhausted script models on the bench: resolve/connect failed).
+void sync_host_fail_http(sync_stage_t stage, int code);
