@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/quynhonsemiconductor/attendance-lock-firmware/compare/v0.2.0...v0.2.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **reader:** reject unconfirmed UID reads and report misreads ([#35](https://github.com/quynhonsemiconductor/attendance-lock-firmware/issues/35)) ([9c93ebe](https://github.com/quynhonsemiconductor/attendance-lock-firmware/commit/9c93ebe6e5ed172ccc2d94906d4a778d642592bf))
+* **sync:** session summary line and battery plausibility gate ([#32](https://github.com/quynhonsemiconductor/attendance-lock-firmware/issues/32)) ([ef73d67](https://github.com/quynhonsemiconductor/attendance-lock-firmware/commit/ef73d67e183d9c3529d5c48af7ecca333c8bccbd))
+
 ## [0.2.0](https://github.com/quynhonsemiconductor/attendance-lock-firmware/compare/v0.1.0...v0.2.0) (2026-10-28)
 
 
