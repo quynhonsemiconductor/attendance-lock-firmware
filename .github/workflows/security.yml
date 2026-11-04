@@ -10,8 +10,9 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '23 4 * * 1'   # weekly, Monday
+  # No `schedule:` here. The repo's ONE periodic scan is scheduled-security.yml
+  # (daily, osv blocking); a weekly run of the same reusable was a duplicate that
+  # cost runner time and gave a red advisory two places to be read.
 
 concurrency:
   group: security-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && format('main-{0}', github.sha) || format('{0}-{1}', github.event_name, github.run_id)) }}
