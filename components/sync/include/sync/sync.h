@@ -48,6 +48,22 @@ typedef struct __attribute__((packed)) {
 // Starts the sync task (device build): one bounded session per interval.
 void sync_init(void);
 
+// --- deep-sleep gate (device build, battery work 2026-11-03) -----------
+// The session schedule lives in RTC memory, so it survives deep sleep: a
+// PIR wake runs no session, a timer wake at the due time does.
+
+// True while a session runs or one is due now (the chip must stay awake).
+bool sync_busy(void);
+
+// RTC time (esp_rtc_get_time_us, µs) at which the next session is due: the
+// deep-sleep timer wake.
+uint64_t sync_next_due_rtc_us(void);
+
+// Blocks new sessions before deep sleep. False when one is running (stay
+// awake). On true the caller either sleeps or calls sync_sleep_cancel().
+bool sync_sleep_prepare(void);
+void sync_sleep_cancel(void);
+
 // One bounded session: Wi-Fi up → SNTP window → allow-list poll (ETag/304)
 // → event batch upload (ack/reject) → SNTP stop → Wi-Fi down. Returns true
 // when both exchanges ended well (304 counts as good). Host tests drive this

@@ -8,6 +8,7 @@
 #include "esp_attr.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_rtc_time.h"
 #include "esp_random.h"
 #include "esp_log.h"
 #include "esp_sntp.h"
@@ -24,7 +25,18 @@ static RTC_NOINIT_ATTR clock_state_t s_rtc_state;
 
 int64_t clock_port_uptime_us(void)
 {
+#if CONFIG_SLEEP_DEEP_ENABLE
+    // esp_timer restarts at 0 on every deep-sleep wake (the wake is a
+    // reboot), which would break the "uptime continuous across deep sleep"
+    // contract in clock.h: an event from before a sleep would be stamped
+    // against a base taken after it. The RTC counter keeps running through
+    // deep sleep. It runs off the internal RC slow clock (calibrated, but
+    // drifts more than the crystal); the base is re-taken every sync
+    // session, which bounds the stamp error to that drift over one interval.
+    return (int64_t)esp_rtc_get_time_us();
+#else
     return esp_timer_get_time();
+#endif
 }
 
 void clock_port_log(const char *msg)

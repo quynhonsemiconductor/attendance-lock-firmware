@@ -42,6 +42,21 @@ bool reader_uid_confirmed(const uint8_t *first, const uint8_t *second, uint8_t u
     return memcmp(first, second, uid_len) == 0;
 }
 
+reader_scan_plan_t reader_scan_plan(uint32_t now_ms, bool pir_high, bool motion_seen,
+                                    uint32_t last_motion_ms, uint32_t active_ms,
+                                    uint32_t poll_ms, uint32_t idle_ms)
+{
+    // Unsigned subtraction: the ms clock wraps every ~49 days.
+    bool fast = pir_high || (motion_seen && (uint32_t)(now_ms - last_motion_ms) < active_ms);
+    reader_scan_plan_t plan = { .fast = fast, .wait_ms = fast ? poll_ms : idle_ms };
+    return plan;
+}
+
+bool reader_pir_stuck(bool high, uint32_t high_since_ms, uint32_t now_ms, uint32_t stuck_ms)
+{
+    return high && stuck_ms > 0 && (uint32_t)(now_ms - high_since_ms) >= stuck_ms;
+}
+
 bool reader_accept(uint8_t *state, size_t state_cap, const reader_card_t *card, uint32_t now_ms,
                    uint32_t debounce_ms, uint32_t cross_read_ms)
 {

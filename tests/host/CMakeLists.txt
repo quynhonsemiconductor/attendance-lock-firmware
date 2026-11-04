@@ -82,6 +82,7 @@ add_test(NAME lock COMMAND host_tests_lock)
 add_test(NAME power COMMAND host_tests_power)
 add_test(NAME provision COMMAND host_tests_provision)
 add_test(NAME door COMMAND host_tests_door)
+add_test(NAME sleep COMMAND host_tests_sleep)
 
 # reader: host-safe tap logic
 add_executable(host_tests_reader
@@ -113,3 +114,10 @@ add_executable(host_tests_power
   ../../components/power/power.c)
 target_include_directories(host_tests_power PRIVATE ../../components/power/include)
 target_link_libraries(host_tests_power PRIVATE unity)
+
+# sleep: the deep-sleep gate + timer math (battery work 2026-11-03)
+add_executable(host_tests_sleep
+  test_sleep_plan.c
+  ../../components/sleep/sleep_plan.c)
+target_include_directories(host_tests_sleep PRIVATE ../../components/sleep/include)
+target_link_libraries(host_tests_sleep PRIVATE unity)

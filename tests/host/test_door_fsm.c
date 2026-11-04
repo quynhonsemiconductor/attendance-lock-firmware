@@ -173,6 +173,86 @@ void test_reader_fault_marks_red_and_keeps_state(void)
     TEST_ASSERT_TRUE(out.engage);
 }
 
+// --- deep-sleep gate: door_fsm_idle ---------------------------------------
+
+static void test_idle_after_init(void)
+{
+    door_fsm_t f;
+    door_fsm_init(&f, HOLD_MS);
+    TEST_ASSERT_TRUE(door_fsm_idle(&f, 0));
+}
+
+static void test_not_idle_while_released_or_beeping(void)
+{
+    door_fsm_t f;
+    door_fsm_init(&f, HOLD_MS);
+    (void)door_fsm_apply(&f, 1000, DOOR_ALLOW);
+    TEST_ASSERT_FALSE(door_fsm_idle(&f, 1000));
+    (void)door_fsm_tick(&f, 1000 + HOLD_MS - 1);
+    TEST_ASSERT_FALSE(door_fsm_idle(&f, 1000 + HOLD_MS - 1)); // still released
+    (void)door_fsm_tick(&f, 1000 + HOLD_MS);
+    TEST_ASSERT_TRUE(door_fsm_idle(&f, 1000 + HOLD_MS)); // relocked, beep long over
+}
+
+static void test_not_idle_until_deny_feedback_ends(void)
+{
+    door_fsm_t f;
+    door_fsm_init(&f, HOLD_MS);
+    (void)door_fsm_apply(&f, 1000, DOOR_DENY_UNKNOWN);
+    for (uint32_t t = 1000; t < 3000; t += 10) {
+        (void)door_fsm_tick(&f, t);
+        TEST_ASSERT_FALSE(door_fsm_idle(&f, t)); // red lasts 2 s
+    }
+    (void)door_fsm_tick(&f, 3000);
+    TEST_ASSERT_TRUE(door_fsm_idle(&f, 3000));
+}
+
+static void test_exit_press_fires_once_after_debounce(void)
+{
+    door_exit_t b;
+    door_exit_init(&b);
+    TEST_ASSERT_FALSE(door_exit_update(&b, false, 0, 50));
+    TEST_ASSERT_FALSE(door_exit_update(&b, true, 100, 50)); // edge seen, not settled
+    TEST_ASSERT_TRUE(door_exit_update(&b, true, 150, 50));  // 50 ms low: press
+    for (uint32_t t = 200; t < 5000; t += 50) {
+        TEST_ASSERT_FALSE(door_exit_update(&b, true, t, 50)); // held: no repeat
+    }
+    TEST_ASSERT_FALSE(door_exit_update(&b, false, 5000, 50));
+    TEST_ASSERT_FALSE(door_exit_update(&b, false, 5050, 50)); // release settles
+    TEST_ASSERT_FALSE(door_exit_update(&b, true, 6000, 50));
+    TEST_ASSERT_TRUE(door_exit_update(&b, true, 6050, 50)); // second press
+}
+
+static void test_exit_bounce_shorter_than_debounce_ignored(void)
+{
+    door_exit_t b;
+    door_exit_init(&b);
+    TEST_ASSERT_FALSE(door_exit_update(&b, true, 1000, 50));
+    TEST_ASSERT_FALSE(door_exit_update(&b, false, 1020, 50));
+    TEST_ASSERT_FALSE(door_exit_update(&b, true, 1040, 50));
+    TEST_ASSERT_FALSE(door_exit_update(&b, false, 1060, 50));
+    TEST_ASSERT_FALSE(door_exit_update(&b, false, 2000, 50));
+}
+
+static void test_exit_debounce_survives_ms_clock_wrap(void)
+{
+    door_exit_t b;
+    door_exit_init(&b);
+    TEST_ASSERT_FALSE(door_exit_update(&b, true, 0xFFFFFFF0u, 50));
+    TEST_ASSERT_TRUE(door_exit_update(&b, true, 0x00000030u, 50)); // 64 ms later
+}
+
+static void test_exit_stuck_after_hold(void)
+{
+    door_exit_t b;
+    door_exit_init(&b);
+    (void)door_exit_update(&b, true, 1000, 50);
+    TEST_ASSERT_FALSE(door_exit_stuck(&b, 60999, 60000));
+    TEST_ASSERT_TRUE(door_exit_stuck(&b, 61000, 60000));
+    (void)door_exit_update(&b, false, 61050, 50);
+    TEST_ASSERT_FALSE(door_exit_stuck(&b, 200000, 60000)); // released: not stuck
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -187,5 +267,12 @@ int main(void)
     RUN_TEST(test_deny_keeps_locked_with_red_and_double_beep);
     RUN_TEST(test_battery_deny_does_not_slam_an_open_window);
     RUN_TEST(test_reader_fault_marks_red_and_keeps_state);
+    RUN_TEST(test_idle_after_init);
+    RUN_TEST(test_not_idle_while_released_or_beeping);
+    RUN_TEST(test_not_idle_until_deny_feedback_ends);
+    RUN_TEST(test_exit_press_fires_once_after_debounce);
+    RUN_TEST(test_exit_bounce_shorter_than_debounce_ignored);
+    RUN_TEST(test_exit_debounce_survives_ms_clock_wrap);
+    RUN_TEST(test_exit_stuck_after_hold);
     return UNITY_END();
 }

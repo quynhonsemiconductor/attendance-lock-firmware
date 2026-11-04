@@ -10,6 +10,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_rtc_time.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -20,6 +21,7 @@
 #include "power/power_calc.h"
 #include "provision/provision.h"
 #include "reader/reader.h"
+#include "sleep/sleep.h"
 #include "store/store.h"
 #include "sync/sync.h"
 
@@ -166,6 +168,70 @@ static void handle_tap(const door_msg_t *msg)
     }
 }
 
+#if CONFIG_DOOR_EXIT_GPIO >= 0
+// Inside exit button (KEY1, GPIO6 active low; 2026-11-03). A press opens
+// like an allowed tap: same hold window and feedback, same battery gate (a
+// release on a sagging pack browns the rail out; the inside handle still
+// opens mechanically). Logged on the console only: the event wire format
+// (sync_event_t) has no "no card" form yet, so nothing is uploaded.
+static door_exit_t s_exit;
+static bool s_exit_stuck_logged;
+
+static void exit_init(bool woke_by_exit)
+{
+    gpio_config_t in = {
+        .pin_bit_mask = 1ULL << CONFIG_DOOR_EXIT_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE, // backs up the board's 10k
+    };
+    (void)gpio_config(&in);
+    door_exit_init(&s_exit);
+    if (woke_by_exit) {
+        // The wake IS the press (handled by the door task's first tick);
+        // the button still being down must not fire it a second time.
+        s_exit.raw = true;
+        s_exit.down = true;
+        s_exit.raw_since_ms = now_ms();
+    }
+}
+
+static void handle_exit(void)
+{
+    if (now_ms() >= s_servo_until_ms) {
+        sample_battery();
+    }
+    uint32_t battery_mv = s_battery_valid ? s_last_battery_mv : 0;
+    door_decision_t d = battery_deny(battery_mv) ? DOOR_DENY_BATTERY : DOOR_ALLOW;
+    door_out_t out = door_fsm_apply(&s_fsm, now_ms(), d);
+    apply_out(&out);
+    ESP_LOGI(TAG, "exit_button %s (%s) battery=%umV", d == DOOR_ALLOW ? "allow" : "deny",
+             door_decision_name(d), battery_mv);
+}
+
+// One sample per door-task tick (50 ms): debounce, press edge, stuck log.
+static void poll_exit(bool *wake_press)
+{
+    bool pressed = gpio_get_level(CONFIG_DOOR_EXIT_GPIO) == 0;
+    uint32_t t = now_ms();
+    bool fire = door_exit_update(&s_exit, pressed, t, CONFIG_DOOR_EXIT_DEBOUNCE_MS);
+    if (*wake_press) {
+        *wake_press = false;
+        fire = true;
+    }
+    if (fire) {
+        handle_exit();
+    }
+    bool stuck = door_exit_stuck(&s_exit, t, CONFIG_DOOR_EXIT_STUCK_S * 1000u);
+    if (stuck && !s_exit_stuck_logged) {
+        ESP_LOGW(TAG, "exit button held %d s: stuck? (ignored for sleep)",
+                 CONFIG_DOOR_EXIT_STUCK_S);
+    } else if (!stuck && s_exit_stuck_logged) {
+        ESP_LOGI(TAG, "exit button released");
+    }
+    s_exit_stuck_logged = stuck;
+}
+#endif
+
 static void reload_allow_list(void)
 {
     char etag[STORE_ETAG_MAX];
@@ -184,7 +250,9 @@ static void on_card_post(const reader_card_t *card)
     door_msg_t msg = {
         .reader = card->reader,
         .uid_len = card->uid_len,
-        .uptime_us = (uint64_t)esp_timer_get_time(),
+        // The clock's uptime, not esp_timer: under deep sleep it is the RTC
+        // counter, the only one continuous across a wake (clock_stamp).
+        .uptime_us = (uint64_t)clock_uptime_us(),
     };
     memcpy(msg.uid, card->uid, card->uid_len);
     xQueueSend(s_taps, &msg, 0); // full queue = a tap we could not keep up with
@@ -196,6 +264,106 @@ static void on_fault_post(uint8_t reader)
     xQueueSend(s_taps, &msg, 0);
 }
 
+#if CONFIG_SLEEP_DEEP_ENABLE
+static sleep_wake_t s_wake;
+static sleep_verdict_t s_last_verdict = SLEEP_GO;
+
+// Deep-sleep gate (battery work 2026-11-03), run every door-task tick. The
+// chip sleeps only with the bolt engaged and settled, no feedback running,
+// no tap queued, no sync session due, no PIR high and no motion for
+// READER_PIR_ACTIVE_MS. It wakes on a PIR (ext1) or when the next session
+// is due (timer). Returns only when it decided to stay awake.
+static void maybe_sleep(void)
+{
+    uint32_t t = now_ms();
+    reader_presence_t pres;
+    reader_presence(&pres);
+    uint32_t console_ms = 0;
+    bool console_seen = provision_console_last_input(&console_ms);
+    // The exit button: a press in progress keeps the chip up (the wake
+    // would fire at once anyway); a stuck one is neither waited for nor
+    // armed as a wake source.
+    bool exit_busy = false;
+    int exit_gpio = -1;
+#if CONFIG_DOOR_EXIT_GPIO >= 0
+    bool exit_stuck = door_exit_stuck(&s_exit, t, CONFIG_DOOR_EXIT_STUCK_S * 1000u);
+    exit_busy = s_exit.raw && !exit_stuck;
+    exit_gpio = exit_stuck ? -1 : CONFIG_DOOR_EXIT_GPIO;
+#endif
+    sleep_inputs_t in = {
+        .now_ms = t,
+        .door_idle = door_fsm_idle(&s_fsm, t) && (int32_t)(t - s_servo_until_ms) >= 0 &&
+                     s_lock_engaged && uxQueueMessagesWaiting(s_taps) == 0 && !exit_busy,
+        .sync_busy = sync_busy(),
+        .pir_high = pres.any_high,
+        .motion_seen = pres.motion_seen,
+        .last_motion_ms = pres.last_motion_ms,
+        .awake_ms = CONFIG_READER_PIR_ACTIVE_MS,
+        .boot_hold_ms = s_wake == SLEEP_WAKE_COLD ? CONFIG_SLEEP_BOOT_AWAKE_S * 1000u : 0,
+        .console_seen = console_seen,
+        .console_last_ms = console_ms,
+        .console_hold_ms = CONFIG_SLEEP_CONSOLE_IDLE_S * 1000u,
+    };
+    sleep_verdict_t v = sleep_decide(&in);
+    if (v != SLEEP_GO) {
+        s_last_verdict = v;
+        return;
+    }
+    // Stop the other tasks between two steps: sync first (non-blocking),
+    // then the reader (waits for a running poll). Past the reader there is
+    // no way back — its task stays parked (and would trip the watchdog),
+    // so nothing after it may fail.
+    if (!sync_sleep_prepare()) {
+        return; // a session started meanwhile
+    }
+    if (!reader_sleep_prepare(500)) {
+        sync_sleep_cancel();
+        return;
+    }
+    feedback_off();
+    reader_presence(&pres); // fresh mask: a PIR may have gone stuck meanwhile
+    uint64_t now_rtc = esp_rtc_get_time_us();
+    uint64_t timer_us =
+        sleep_timer_us(now_rtc, sync_next_due_rtc_us(), 1000000ull, 24ull * 3600u * 1000000u);
+    ESP_LOGI(TAG, "idle (last stay: %s, uptime %u ms) -> deep sleep",
+             sleep_verdict_name(s_last_verdict), (unsigned)t);
+    // RST low = RC522 hard power-down; CS high = deselected; the servo
+    // signal and feedback low (a floating line can twitch the servo or
+    // half-drive the buzzer transistor).
+    const int hold_low[] = {
+        CONFIG_READER_RST_OUT,
+        CONFIG_READER_RST_IN,
+#if CONFIG_LOCK_BACKEND_SERVO
+        CONFIG_LOCK_SERVO_GPIO,
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0 && CONFIG_LOCK_SERVO_PWR_ACTIVE
+        CONFIG_LOCK_SERVO_PWR_GPIO, // servo rail off
+#endif
+#elif CONFIG_LOCK_RELAY_ACTIVE
+        CONFIG_LOCK_RELAY_GPIO, // active-high relay: engaged = low
+#endif
+        CONFIG_DOOR_FEEDBACK_GPIO_GREEN,
+        CONFIG_DOOR_FEEDBACK_GPIO_RED,
+        CONFIG_DOOR_FEEDBACK_GPIO_BUZZER,
+    };
+    const int hold_high[] = {
+        CONFIG_READER_CS_OUT,
+        CONFIG_READER_CS_IN,
+#if CONFIG_LOCK_BACKEND_RELAY && !CONFIG_LOCK_RELAY_ACTIVE
+        CONFIG_LOCK_RELAY_GPIO, // active-low relay: engaged = high
+#endif
+#if CONFIG_LOCK_BACKEND_SERVO && CONFIG_LOCK_SERVO_PWR_GPIO >= 0 && !CONFIG_LOCK_SERVO_PWR_ACTIVE
+        CONFIG_LOCK_SERVO_PWR_GPIO, // active-low enable: servo rail off
+#endif
+        -1, // keeps the array non-empty in every configuration
+    };
+    // A PIR that went high since the gate is still in the mask: ext1 then
+    // wakes the chip at once, which costs one boot, never a missed person.
+    sleep_enter(pres.wake_mask, exit_gpio, timer_us, hold_low,
+                sizeof(hold_low) / sizeof(hold_low[0]), hold_high,
+                sizeof(hold_high) / sizeof(hold_high[0]));
+}
+#endif
+
 static void door_task(void *arg)
 {
     (void)arg;
@@ -203,6 +371,9 @@ static void door_task(void *arg)
     uint32_t last_reload = 0;
     bool was_released = false;
     bool pm_held = true; // held since app_main's boot engage (below)
+#if CONFIG_DOOR_EXIT_GPIO >= 0
+    bool exit_wake_press = sleep_boot() == SLEEP_WAKE_EXIT; // idempotent
+#endif
     for (;;) {
         door_msg_t msg;
         if (xQueueReceive(s_taps, &msg, pdMS_TO_TICKS(50))) {
@@ -215,6 +386,9 @@ static void door_task(void *arg)
                 handle_tap(&msg);
             }
         }
+#if CONFIG_DOOR_EXIT_GPIO >= 0
+        poll_exit(&exit_wake_press);
+#endif
         door_out_t out = door_fsm_tick(&s_fsm, now_ms());
         apply_out(&out);
 
@@ -237,11 +411,23 @@ static void door_task(void *arg)
             last_reload = now_ms();
         }
         esp_task_wdt_reset();
+#if CONFIG_SLEEP_DEEP_ENABLE
+        maybe_sleep();
+#endif
     }
 }
 
 void app_main(void)
 {
+    // First: release the pins the previous deep sleep held (RC522 RST/CS,
+    // servo, feedback) before any driver touches them, and learn why we run.
+    sleep_wake_t wake = sleep_boot();
+#if CONFIG_SLEEP_DEEP_ENABLE
+    s_wake = wake;
+#else
+    (void)wake;
+#endif
+
     // Power management on: DFS + light sleep between the reader polls
     // (the pm lock keeps the chip awake while the lock moves or is released).
     esp_pm_config_t pm = {
@@ -269,8 +455,16 @@ void app_main(void)
     } else {
         esp_pm_lock_acquire(s_nosleep);
     }
-    lock_init();
-    s_servo_until_ms = now_ms() + CONFIG_LOCK_SERVO_MOVE_MS;
+    if (sleep_resumed_locked()) {
+        // Deep-sleep wake: the chip only sleeps with the bolt engaged and
+        // settled — no boot engage (a servo surge on every PIR wake). Any
+        // other boot (power-on, reset, crash) engages: §2.8 fail-secure.
+        lock_resume();
+        s_servo_until_ms = now_ms();
+    } else {
+        lock_init();
+        s_servo_until_ms = now_ms() + CONFIG_LOCK_SERVO_MOVE_MS;
+    }
 
     provision_init();
     bool store_ok = store_init();
@@ -296,6 +490,9 @@ void app_main(void)
         door_out_t fault = door_fsm_fault(&s_fsm, now_ms());
         gpio_set_level(CONFIG_DOOR_FEEDBACK_GPIO_RED, fault.red ? 1 : 0);
     }
+#if CONFIG_DOOR_EXIT_GPIO >= 0
+    exit_init(wake == SLEEP_WAKE_EXIT);
+#endif
     s_taps = xQueueCreate(8, sizeof(door_msg_t));
     reload_allow_list(); // primes buffer 0 (and flips to it)
 

@@ -8,6 +8,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -106,6 +107,15 @@ bool provision_port_allow_http(void)
 // the LF that starts the next line.
 static bool skip_lf;
 
+static volatile bool s_input_seen;
+static volatile uint32_t s_input_ms;
+
+bool provision_console_last_input(uint32_t *last_ms)
+{
+    *last_ms = s_input_ms;
+    return s_input_seen;
+}
+
 static size_t read_line(char *buf, size_t cap)
 {
     size_t n = 0;
@@ -116,6 +126,8 @@ static size_t read_line(char *buf, size_t cap)
             vTaskDelay(pdMS_TO_TICKS(20)); // between characters: yield
             continue;
         }
+        s_input_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        s_input_seen = true;
         if (c == '\r' || c == '\n') {
             if (c == '\n' && n == 0 && skip_lf) {
                 skip_lf = false; // the LF of a CR LF pair

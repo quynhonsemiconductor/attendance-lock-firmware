@@ -19,6 +19,11 @@ void lock_init(void)
     lock_engage(); // fail-secure boot state (§2.8)
 }
 
+void lock_resume(void)
+{
+    lock_esp_init(); // servo: duty 0 (no pulse); relay: engaged level
+}
+
 void lock_engage(void)
 {
 #if CONFIG_LOCK_BACKEND_SERVO
