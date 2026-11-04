@@ -207,6 +207,21 @@ static void test_not_idle_until_deny_feedback_ends(void)
     TEST_ASSERT_TRUE(door_fsm_idle(&f, 3000));
 }
 
+static void test_not_idle_while_a_beep_is_pending_or_on(void)
+{
+    // Red and the release window normally outlast the beeps, so this pins
+    // the beep arm on its own: a sleep mid-pattern would freeze the buzzer.
+    door_fsm_t f;
+    door_fsm_init(&f, HOLD_MS);
+    f.beeps_left = 1;
+    TEST_ASSERT_FALSE(door_fsm_idle(&f, 1000));
+    f.beeps_left = 0;
+    f.beep_on = true;
+    TEST_ASSERT_FALSE(door_fsm_idle(&f, 1000));
+    f.beep_on = false;
+    TEST_ASSERT_TRUE(door_fsm_idle(&f, 1000));
+}
+
 static void test_exit_press_fires_once_after_debounce(void)
 {
     door_exit_t b;
@@ -270,6 +285,7 @@ int main(void)
     RUN_TEST(test_idle_after_init);
     RUN_TEST(test_not_idle_while_released_or_beeping);
     RUN_TEST(test_not_idle_until_deny_feedback_ends);
+    RUN_TEST(test_not_idle_while_a_beep_is_pending_or_on);
     RUN_TEST(test_exit_press_fires_once_after_debounce);
     RUN_TEST(test_exit_bounce_shorter_than_debounce_ignored);
     RUN_TEST(test_exit_debounce_survives_ms_clock_wrap);
