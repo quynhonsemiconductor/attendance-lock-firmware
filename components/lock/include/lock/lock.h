@@ -18,6 +18,12 @@ extern "C" {
 // Brings the output up and ENGAGES (fail-secure boot state, §2.8).
 void lock_init(void);
 
+// Brings the output up WITHOUT moving (deep-sleep wake, battery work
+// 2026-11-03): the chip only sleeps with the bolt engaged and settled, so
+// re-driving it on every PIR wake would only spend a servo surge. Servo:
+// LEDC up with no pulse. Relay: the engaged level.
+void lock_resume(void);
+
 // Drives to the locked position/level.
 void lock_engage(void);
 

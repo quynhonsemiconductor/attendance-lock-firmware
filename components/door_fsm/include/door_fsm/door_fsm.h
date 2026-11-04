@@ -65,7 +65,33 @@ door_out_t door_fsm_tick(door_fsm_t *fsm, uint32_t now_ms);
 
 bool door_fsm_released(const door_fsm_t *fsm);
 
+// Nothing left to drive at now_ms: locked, no beep running or pending, no
+// red feedback. The deep-sleep gate (main.c) only sleeps when this holds
+// (battery work 2026-11-03): sleeping mid-pattern would freeze the buzzer
+// or cut the deny feedback short.
+bool door_fsm_idle(const door_fsm_t *fsm, uint32_t now_ms);
+
 const char *door_decision_name(door_decision_t d);
+
+// --- exit button (KEY1 on GPIO6, active low; 2026-11-03) ---------------
+// Debounce for the inside exit button, sampled at the door task's 50 ms
+// cadence. A press opens like an allowed tap (door_fsm_apply(DOOR_ALLOW)),
+// once per press: holding the button does not keep the door open.
+typedef struct {
+    bool raw;              // last sampled level (true = pressed)
+    uint32_t raw_since_ms; // when raw last changed
+    bool down;             // debounced level
+} door_exit_t;
+
+void door_exit_init(door_exit_t *b);
+
+// Feeds one sample; true exactly once per debounced press (the edge).
+bool door_exit_update(door_exit_t *b, bool pressed, uint32_t now_ms, uint32_t debounce_ms);
+
+// Pressed (raw) for at least stuck_ms: a jammed or shorted button. The
+// deep-sleep gate ignores a stuck button and does not arm its wake —
+// otherwise it would keep the chip awake (or re-wake it) until the pack dies.
+bool door_exit_stuck(const door_exit_t *b, uint32_t now_ms, uint32_t stuck_ms);
 
 #ifdef __cplusplus
 }

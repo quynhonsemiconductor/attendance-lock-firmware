@@ -15,7 +15,11 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_attr.h"
+#include "esp_rtc_time.h"
+#include "esp_system.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -400,14 +404,78 @@ void sync_port_delay_ms(uint32_t ms)
     vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
+// Session schedule in RTC memory (battery work 2026-11-03): deep sleep
+// restarts the firmware, so "when is the next session due" must survive it
+// — a PIR wake must not run a session, a timer wake must. RTC time
+// (esp_rtc_get_time_us) keeps counting through deep sleep; esp_timer does
+// not. Any boot other than a deep-sleep wake runs a session at once (the
+// behaviour before deep sleep existed).
+#define SCHED_MAGIC 0x53594E43u // "SYNC"
+static RTC_NOINIT_ATTR struct {
+    uint32_t magic;
+    uint32_t fails;
+    uint64_t due_us; // RTC µs
+} s_sched;
+
+static SemaphoreHandle_t s_session_lock; // held for one session; sleep takes it
+static volatile bool s_session_running;
+
+static uint64_t rtc_now_us(void)
+{
+    return esp_rtc_get_time_us();
+}
+
+bool sync_busy(void)
+{
+    if (s_session_lock == NULL) {
+        return false; // no task (sync never started): nothing to wait for
+    }
+    return s_session_running || rtc_now_us() >= s_sched.due_us;
+}
+
+uint64_t sync_next_due_rtc_us(void)
+{
+    return s_sched.due_us;
+}
+
+bool sync_sleep_prepare(void)
+{
+    if (s_session_lock == NULL) {
+        return true;
+    }
+    return xSemaphoreTake(s_session_lock, 0) == pdTRUE;
+}
+
+void sync_sleep_cancel(void)
+{
+    if (s_session_lock != NULL) {
+        xSemaphoreGive(s_session_lock);
+    }
+}
+
 static void sync_task(void *arg)
 {
     (void)arg;
-    uint32_t fails = 0;
     for (;;) {
+        uint64_t now = rtc_now_us();
+        if (now < s_sched.due_us) {
+            uint64_t wait_ms = (s_sched.due_us - now + 999u) / 1000u;
+            if (wait_ms > 60000u) {
+                wait_ms = 60000u; // re-check: the RTC and tick clocks drift apart
+            }
+            vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+            continue;
+        }
+        // Blocks only while the door task is entering deep sleep (it never
+        // gives the lock back then).
+        xSemaphoreTake(s_session_lock, portMAX_DELAY);
+        s_session_running = true;
         bool ok = sync_session_run();
-        fails = ok ? 0 : fails + 1;
-        uint32_t delay_ms = sync_next_delay_ms(ok, fails);
+        s_sched.fails = ok ? 0 : s_sched.fails + 1;
+        uint32_t delay_ms = sync_next_delay_ms(ok, s_sched.fails);
+        s_sched.due_us = rtc_now_us() + (uint64_t)delay_ms * 1000u;
+        s_session_running = false;
+        xSemaphoreGive(s_session_lock);
         // One summary line per session at INFO, success included: the bench
         // operator reads WHY a session failed and WHEN the next one runs
         // without the server log (round-3 bench finding). The `sync: `
@@ -415,15 +483,25 @@ static void sync_task(void *arg)
         sync_session_result_t res;
         sync_session_result(&res);
         char line[320];
-        if (sync_format_summary(&res, fails, delay_ms, line, sizeof(line)) > 0) {
+        if (sync_format_summary(&res, s_sched.fails, delay_ms, line, sizeof(line)) > 0) {
             ESP_LOGI(TAG, "%s", line);
         }
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
 void sync_port_task_start(void)
 {
+    bool deep_wake = esp_reset_reason() == ESP_RST_DEEPSLEEP;
+    if (!deep_wake || s_sched.magic != SCHED_MAGIC) {
+        s_sched.magic = SCHED_MAGIC;
+        s_sched.fails = 0;
+        s_sched.due_us = 0; // due now
+    }
+    s_session_lock = xSemaphoreCreateMutex();
+    if (s_session_lock == NULL) {
+        ESP_LOGE(TAG, "session lock alloc failed — no sync");
+        return;
+    }
     // ≥ 10 KiB: the TLS handshake peaks deep in mbedtls; verified against
     // uxTaskGetStackHighWaterMark on the target during bench bring-up.
     xTaskCreate(sync_task, "sync", 10240, NULL, tskIDLE_PRIORITY + 2, NULL);

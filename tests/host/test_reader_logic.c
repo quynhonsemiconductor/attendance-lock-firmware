@@ -88,6 +88,66 @@ void test_tap_logic_bad_state_rejected(void)
     TEST_ASSERT_FALSE(reader_accept(small, sizeof(small), &c, 1000, 1000, 800));
 }
 
+// PIR-gated cadence (battery work 2026-11-01): fast 400 ms polls while there
+// is motion and for 10 s after it (1 s tap-to-read target), 5 s otherwise.
+#define ACTIVE 10000u
+#define POLL 400u
+#define IDLE 5000u
+
+void test_scan_plan_idle_before_any_motion(void)
+{
+    reader_scan_plan_t p = reader_scan_plan(1000, false, false, 0, ACTIVE, POLL, IDLE);
+    TEST_ASSERT_FALSE(p.fast);
+    TEST_ASSERT_EQUAL_UINT32(IDLE, p.wait_ms);
+}
+
+void test_scan_plan_fast_while_pir_high(void)
+{
+    // High level wins even with a stale last-motion stamp.
+    reader_scan_plan_t p = reader_scan_plan(90000, true, true, 1000, ACTIVE, POLL, IDLE);
+    TEST_ASSERT_TRUE(p.fast);
+    TEST_ASSERT_EQUAL_UINT32(POLL, p.wait_ms);
+}
+
+void test_scan_plan_window_after_motion_then_idle(void)
+{
+    // Person stopped moving at t=20000 (finding the card): still fast.
+    reader_scan_plan_t p = reader_scan_plan(20000 + ACTIVE - 1, false, true, 20000, ACTIVE, POLL,
+                                            IDLE);
+    TEST_ASSERT_TRUE(p.fast);
+    TEST_ASSERT_EQUAL_UINT32(POLL, p.wait_ms);
+    // Window over: back to the fallback cadence.
+    p = reader_scan_plan(20000 + ACTIVE, false, true, 20000, ACTIVE, POLL, IDLE);
+    TEST_ASSERT_FALSE(p.fast);
+    TEST_ASSERT_EQUAL_UINT32(IDLE, p.wait_ms);
+}
+
+void test_scan_plan_survives_ms_clock_wrap(void)
+{
+    // Motion 1 s before the uint32 ms clock wraps, checked 2 s after.
+    uint32_t last = 0xFFFFFFFFu - 999u;
+    reader_scan_plan_t p = reader_scan_plan(2000, false, true, last, ACTIVE, POLL, IDLE);
+    TEST_ASSERT_TRUE(p.fast);
+    p = reader_scan_plan(last + ACTIVE, false, true, last, ACTIVE, POLL, IDLE);
+    TEST_ASSERT_FALSE(p.fast);
+}
+
+// --- stuck PIR (deep-sleep gate) ------------------------------------------
+
+static void test_pir_stuck_only_after_a_long_unbroken_high(void)
+{
+    TEST_ASSERT_FALSE(reader_pir_stuck(false, 0, 120000, 60000)); // low: never
+    TEST_ASSERT_FALSE(reader_pir_stuck(true, 1000, 60999, 60000));
+    TEST_ASSERT_TRUE(reader_pir_stuck(true, 1000, 61000, 60000));
+    TEST_ASSERT_FALSE(reader_pir_stuck(true, 0, 999999, 0)); // 0 = feature off
+}
+
+static void test_pir_stuck_survives_ms_clock_wrap(void)
+{
+    TEST_ASSERT_FALSE(reader_pir_stuck(true, 0xFFFFF000u, 0x00001000u, 60000));
+    TEST_ASSERT_TRUE(reader_pir_stuck(true, 0xFFFFF000u, 0x00010000u, 60000));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -97,5 +157,11 @@ int main(void)
     RUN_TEST(test_bcc_accepts_a_valid_anticoll_frame);
     RUN_TEST(test_bcc_rejects_a_corrupted_anticoll_frame);
     RUN_TEST(test_confirm_read_rejects_a_flapping_uid);
+    RUN_TEST(test_scan_plan_idle_before_any_motion);
+    RUN_TEST(test_scan_plan_fast_while_pir_high);
+    RUN_TEST(test_scan_plan_window_after_motion_then_idle);
+    RUN_TEST(test_scan_plan_survives_ms_clock_wrap);
+    RUN_TEST(test_pir_stuck_only_after_a_long_unbroken_high);
+    RUN_TEST(test_pir_stuck_survives_ms_clock_wrap);
     return UNITY_END();
 }

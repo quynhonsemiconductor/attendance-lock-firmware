@@ -39,7 +39,7 @@ với opshub ngay trên laptop — mục 7). Ghi kết quả vào cột **Pass?*
 | LED green | 16 | |
 | LED red | 47 | |
 | Buzzer | 5 | |
-| Battery divider tap | 1 | ADC1 channel 0; pack+ → 100 k → tap → 10 k → GND |
+| Battery divider tap | 1 | ADC1 channel 0; pack+ → 100 k → tap → 10 k → GND (default 11/1). Bench board: 100 k / 47 k → `DIV_MUL=147`, `DIV_DIV=47` (dev profile) |
 
 Both RC522 modules share one SPI bus (hand-driven CS). The servo and the
 divider both reference the PSU/battery rail, not the devkit 3V3. Common
@@ -48,6 +48,80 @@ ground between PSU, servo and devkit is mandatory.
 Expected single-reader log noise: `reader 1 offline at boot — probing every
 5000 ms` every ~5 s — the unconnected second reader probing on its recovery
 cadence. That is normal, not a fault.
+
+### PIR presence sensors + deep sleep (dev profile, 2026-11-03)
+
+| Signal | GPIO | Node |
+|---|---|---|
+| Outside AM312 OUT (via 1 k, 100 k pull-down) | 18 | KSCL (`CONFIG_READER_PIR_GPIO`) |
+| Inside AM312 OUT (via 1 k, 100 k pull-down) | 8 | KSDA (`CONFIG_READER_PIR2_GPIO`) |
+| AM312 VIN (via 1 k + 10 µF/100 nF) | — | 3.3 V at each board |
+
+Remove any I2C pull-ups on KSDA/KSCL: they would hold the PIR inputs high
+(no deep sleep) and draw ~0.5 mA each. The PIRs only decide WHEN the readers
+are polled and when the chip sleeps — never an unlock. Boot log:
+`pir 0 on GPIO18: fast 400 ms for 3000 ms after motion, idle 2000 ms` (and
+`pir 1 on GPIO8`). Then:
+
+| Line | Meaning |
+|---|---|
+| `pir: motion -> fast scan every 400 ms (until 3000 ms after last motion)` | Motion on either PIR (or a card in the field): polls every 400 ms, first one at once |
+| `pir: GPIO18 high for 60 s — ignored until it drops` | Stuck PIR: no longer holds the chip awake or wakes it |
+| `door: idle (last stay: motion, uptime 4210 ms) -> deep sleep` | Nothing to do: entering deep sleep |
+| `sleep: deep sleep #N: pir mask 0x40100, timer 3412 s` | Wakes on GPIO8/GPIO18 high or when the next sync is due |
+| `sleep: wake #N: pir (mask 0x40000)` | Woken by the outside PIR: the bolt is NOT driven again |
+| `sleep: wake #N: timer (sync due)` | Woken for the sync session; sleeps again right after it |
+
+`CONFIG_SLEEP_DEEP_ENABLE` rules:
+
+- After a power-on or the EN/RESET button the chip stays awake
+  `CONFIG_SLEEP_BOOT_AWAKE_S` (120 s): the console window. Typing keeps it
+  awake 60 s more. **To provision or flash, press RESET first**: while it
+  sleeps USB (COM4) is gone and the console does not answer.
+- Awake time after a PIR wake: while the PIR is high, plus
+  `CONFIG_READER_PIR_ACTIVE_MS` (3 s), plus any unlock (hold + servo move).
+- No fallback poll while asleep: a covered PIR means a card is not read until
+  someone moves in front of it.
+- The dev profile syncs every 120 min (`CONFIG_SYNC_INTERVAL_MIN`): for a
+  sync test set 1 locally, and back to 120 before measuring the current —
+  1 min means ~1440 Wi-Fi sessions a day (~2 weeks on 4xD).
+
+The AM312 needs ~60 s after power-on to settle; motion lines in that window
+are expected. A stream of wakes with nobody in range (servo moves, Wi-Fi
+sync) means supply noise into the PIR — check its RC filter and GND.
+
+Deep-sleep checks (current on the 6 V lead, door closed, nobody in range):
+
+| # | Action | Expected |
+|---|---|---|
+| S1 | Power on, wait 2 min | `-> deep sleep`; current drops to the sleep floor |
+| S2 | Walk up to the outside reader, tap within 3 s | `wake: pir`, `tap r=0` within ~1 s of the tap, no servo move on wake |
+| S3 | Same at the inside reader | `wake: pir (mask 0x100)`, `tap r=1` |
+| S4 | Allow tap | releases, relocks after the hold, then sleeps again |
+| S5 | Wait for the sync interval | `wake: timer`, one `sync: session ...` line, back to sleep |
+| S6 | Taps while asleep/offline, then a sync | events upload with correct `device_ts` |
+
+### Exit button + servo power switch (dev profile, 2026-11-03)
+
+| Signal | GPIO | Node |
+|---|---|---|
+| KEY1 exit button (10 k pull-up, 100 nF, press = GND) | 6 | `CONFIG_DOOR_EXIT_GPIO` |
+| Servo power switch EN (high = servo on) | 14 | `CONFIG_LOCK_SERVO_PWR_GPIO` |
+
+The exit button is bench-only: SECURITY.md keeps egress mechanical (prod
+-1). A press opens like an allowed tap (same hold, green + single beep),
+once per press; low battery denies it like a tap. It is logged on the
+console only (`door: exit_button allow (allow) battery=...`) — not
+uploaded, the event format has no "no card" form yet. The servo rail is on
+only for a move: EN high, 20 ms, the pulse, then pulse and EN off after
+`CONFIG_LOCK_SERVO_MOVE_MS`; EN is held low through deep sleep.
+
+| # | Action | Expected |
+|---|---|---|
+| S7 | Awake, press KEY1 | `exit_button allow`, releases, relocks after the hold |
+| S8 | Asleep, press KEY1 | `wake: exit button`, release within ~0.5 s, back to sleep after the relock |
+| S9 | Hold KEY1 for > 60 s | one release, then `exit button held 60 s: stuck?`; the chip sleeps again |
+| S10 | Meter on the servo 6 V between moves and in sleep | ~0 mA (EN low); servo still moves on every allow |
 
 ## 3. Flash steps
 
