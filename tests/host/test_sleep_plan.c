@@ -111,6 +111,27 @@ static void test_timer_until_due_clamped(void)
     TEST_ASSERT_EQUAL_UINT64(5 * s, sleep_timer_us(10 * s, 11 * s, 30 * s, 5 * s));
 }
 
+static void test_degraded_sleep_caps_the_timer(void)
+{
+    const uint64_t s = 1000000ull;
+    // healthy wake path: the sync timer stands, however long
+    TEST_ASSERT_EQUAL_UINT64(7200 * s, sleep_fallback_timer_us(7200 * s, false, 60 * s));
+    TEST_ASSERT_EQUAL_UINT64(0, sleep_fallback_timer_us(0, false, 60 * s));
+    // stuck PIR / refused ext0-ext1: never longer than the fallback
+    TEST_ASSERT_EQUAL_UINT64(60 * s, sleep_fallback_timer_us(7200 * s, true, 60 * s));
+    TEST_ASSERT_EQUAL_UINT64(60 * s, sleep_fallback_timer_us(0, true, 60 * s)); // no timer
+    TEST_ASSERT_EQUAL_UINT64(5 * s, sleep_fallback_timer_us(5 * s, true, 60 * s)); // sooner stays
+}
+
+static void test_boot_hold_after_cold_degraded_and_normal_wakes(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(120000, sleep_boot_hold_ms(true, false, 120000, 2400));
+    TEST_ASSERT_EQUAL_UINT32(120000, sleep_boot_hold_ms(true, true, 120000, 2400));
+    // fallback wake: up long enough for the readers to poll
+    TEST_ASSERT_EQUAL_UINT32(2400, sleep_boot_hold_ms(false, true, 120000, 2400));
+    TEST_ASSERT_EQUAL_UINT32(0, sleep_boot_hold_ms(false, false, 120000, 2400));
+}
+
 static void test_verdict_names(void)
 {
     TEST_ASSERT_EQUAL_STRING("go", sleep_verdict_name(SLEEP_GO));
@@ -130,6 +151,8 @@ int main(void)
     RUN_TEST(test_cold_boot_console_window);
     RUN_TEST(test_console_input_extends_the_window);
     RUN_TEST(test_timer_until_due_clamped);
+    RUN_TEST(test_degraded_sleep_caps_the_timer);
+    RUN_TEST(test_boot_hold_after_cold_degraded_and_normal_wakes);
     RUN_TEST(test_verdict_names);
     return UNITY_END();
 }

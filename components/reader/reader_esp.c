@@ -250,8 +250,12 @@ void reader_presence(reader_presence_t *out)
 #if CONFIG_READER_PIR_GPIO >= 0
     for (int i = 0; i < PIR_COUNT; i++) {
         const pir_t *p = &s_pir[i];
-        if (!p->ok || p->stuck) {
-            continue; // a stuck PIR neither holds the chip awake nor wakes it
+        if (!p->ok) {
+            continue;
+        }
+        if (p->stuck) {
+            out->pir_dropped = true; // neither holds the chip awake nor wakes it
+            continue;
         }
         out->wake_mask |= 1ULL << p->gpio;
         // fired: the ISR saw a high level the poll task has not sampled yet

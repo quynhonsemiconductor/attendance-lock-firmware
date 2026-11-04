@@ -56,7 +56,10 @@ config LOCK_SERVO_PWR_GPIO
         servo is powered only for a move: EN on, LOCK_SERVO_PWR_LEAD_MS for
         the rail to come up, the pulse, then pulse AND power off after
         LOCK_SERVO_MOVE_MS. With LOCK_SERVO_RELEASE=n the power stays on
-        (the held pulse needs it). Held off through deep sleep.
+        while the chip is awake (the held pulse needs it). Deep sleep has no
+        PWM, so there is no pulse to hold: EN is held off through deep sleep
+        in every mode, and lock_resume() re-drives the held pulse (and the
+        rail) on the wake.
 
 config LOCK_SERVO_PWR_ACTIVE
     int "Servo power enable active level (1 = high turns the servo on)"

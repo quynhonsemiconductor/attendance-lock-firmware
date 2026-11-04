@@ -24,11 +24,13 @@ static RTC_NOINIT_ATTR struct {
     uint64_t held_low; // pins held low / high through the sleep
     uint64_t held_high;
     uint32_t sleeps;   // deep sleeps since power-on (log only)
+    uint32_t degraded; // 1 = slept with a degraded wake path (fallback timer)
 } s_rtc;
 
 static bool s_booted;
 static sleep_wake_t s_wake;
 static bool s_resumed_locked;
+static bool s_degraded_wake;
 static uint64_t s_wake_pins;
 
 static void release_holds(uint64_t mask, int level)
@@ -82,7 +84,9 @@ sleep_wake_t sleep_boot(void)
         s_rtc.magic = SLEEP_MAGIC;
         s_rtc.sleeps = 0;
     }
+    s_degraded_wake = deep && rtc_ok && s_rtc.degraded == 1;
     s_rtc.locked = 0; // consumed: a later reset must not inherit it
+    s_rtc.degraded = 0;
     s_rtc.held_low = 0;
     s_rtc.held_high = 0;
 
@@ -104,6 +108,9 @@ sleep_wake_t sleep_boot(void)
     default:
         break;
     }
+    if (s_degraded_wake) {
+        ESP_LOGW(TAG, "wake after a degraded sleep: staying up for one poll window");
+    }
     if (deep && !s_resumed_locked) {
         ESP_LOGW(TAG, "deep-sleep wake without the locked flag: engaging the bolt");
     }
@@ -113,6 +120,11 @@ sleep_wake_t sleep_boot(void)
 bool sleep_resumed_locked(void)
 {
     return s_resumed_locked;
+}
+
+bool sleep_degraded_wake(void)
+{
+    return s_degraded_wake;
 }
 
 static uint64_t hold_pins(const int *pins, size_t n, int level)
@@ -144,28 +156,24 @@ static uint64_t hold_pins(const int *pins, size_t n, int level)
     return mask;
 }
 
-void sleep_enter(bool bolt_engaged, uint64_t wake_mask, int exit_gpio, uint64_t timer_us,
-                 const int *hold_low, size_t n_low, const int *hold_high, size_t n_high)
+bool sleep_enter(bool bolt_engaged, uint64_t wake_mask, bool pir_dropped, int exit_gpio,
+                 uint64_t timer_us, const int *hold_low, size_t n_low, const int *hold_high,
+                 size_t n_high)
 {
-    s_rtc.magic = SLEEP_MAGIC;
-    s_rtc.held_low = hold_pins(hold_low, n_low, 0);
-    s_rtc.held_high = hold_pins(hold_high, n_high, 1);
-    gpio_deep_sleep_hold_en();
-    s_rtc.locked = bolt_engaged ? 1 : 0; // only 1 skips the next boot engage
-    s_rtc.sleeps++;
-
-    // A wake source that refuses to arm (the Kconfig ranges keep the pins
-    // RTC-capable, so this is a bug, not a config) would leave people at the
-    // door unserved until the next timer wake — up to 24 h. Bound that
-    // outage with a short timer instead: each fallback wake re-polls.
-    const uint64_t k_lost_wake_fallback_us = 60ull * 1000000u;
-    bool lost_wake = false;
+    // Wake sources first, pins after: a refusal found here can still back
+    // out with nothing held. A degraded wake path (a stuck PIR left out, or
+    // ext0/ext1 refused — the Kconfig ranges keep the pins RTC-capable, so
+    // a refusal is a bug, not a config) must not leave the door unserved
+    // until the next sync timer (up to 24 h): the timer is capped at 60 s
+    // and the next boot stays up for one poll window (sleep_boot_hold_ms).
+    const uint64_t k_fallback_us = 60ull * 1000000u;
+    bool degraded = pir_dropped;
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     if (wake_mask != 0 &&
         esp_sleep_enable_ext1_wakeup_io(wake_mask, ESP_EXT1_WAKEUP_ANY_HIGH) != ESP_OK) {
         ESP_LOGE(TAG, "ext1 wakeup on 0x%llx refused", (unsigned long long)wake_mask);
         wake_mask = 0;
-        lost_wake = true;
+        degraded = true;
     }
     // ext1 is ANY_HIGH for the PIRs; the active-low button needs its own
     // level, which only ext0 gives (it keeps the RTC peripherals powered: a
@@ -173,20 +181,31 @@ void sleep_enter(bool bolt_engaged, uint64_t wake_mask, int exit_gpio, uint64_t 
     if (exit_gpio >= 0 && esp_sleep_enable_ext0_wakeup((gpio_num_t)exit_gpio, 0) != ESP_OK) {
         ESP_LOGE(TAG, "ext0 wakeup on GPIO%d refused", exit_gpio);
         exit_gpio = -1;
-        lost_wake = true;
+        degraded = true;
     }
-    if (lost_wake && (timer_us == 0 || timer_us > k_lost_wake_fallback_us)) {
-        timer_us = k_lost_wake_fallback_us;
-        ESP_LOGW(TAG, "lost wake source: timer fallback %llu s",
-                 (unsigned long long)(timer_us / 1000000u));
+    timer_us = sleep_fallback_timer_us(timer_us, degraded, k_fallback_us);
+    if (timer_us > 0 && esp_sleep_enable_timer_wakeup(timer_us) != ESP_OK) {
+        // Without the timer the next sync (or the degraded fallback) never
+        // comes: do not sleep. Nothing is held yet.
+        ESP_LOGE(TAG, "timer wakeup %llu us refused: staying awake",
+                 (unsigned long long)timer_us);
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+        return false;
     }
-    if (timer_us > 0) {
-        (void)esp_sleep_enable_timer_wakeup(timer_us);
-    }
-    ESP_LOGI(TAG, "deep sleep #%u: pir mask 0x%llx, exit gpio %d, timer %llu s",
+
+    s_rtc.magic = SLEEP_MAGIC;
+    s_rtc.held_low = hold_pins(hold_low, n_low, 0);
+    s_rtc.held_high = hold_pins(hold_high, n_high, 1);
+    gpio_deep_sleep_hold_en();
+    s_rtc.locked = bolt_engaged ? 1 : 0; // only 1 skips the next boot engage
+    s_rtc.degraded = degraded ? 1 : 0;
+    s_rtc.sleeps++;
+    ESP_LOGI(TAG, "deep sleep #%u: pir mask 0x%llx, exit gpio %d, timer %llu s%s",
              (unsigned)s_rtc.sleeps, (unsigned long long)wake_mask, exit_gpio,
-             (unsigned long long)(timer_us / 1000000u));
+             (unsigned long long)(timer_us / 1000000u),
+             degraded ? " (degraded: fallback timer)" : "");
     fflush(stdout);
     vTaskDelay(pdMS_TO_TICKS(20)); // let the UART drain the last line
     esp_deep_sleep_start();
+    return false; // not reached
 }

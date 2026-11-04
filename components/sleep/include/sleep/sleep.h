@@ -48,6 +48,19 @@ sleep_verdict_t sleep_decide(const sleep_inputs_t *in);
 
 const char *sleep_verdict_name(sleep_verdict_t v);
 
+// A sleep with a degraded wake path (a PIR left out as stuck, or a wake
+// source the chip refused) must not rely on the timer alone for hours:
+// the timer is capped at fallback_us (0 = no timer also becomes
+// fallback_us). Undegraded, timer_us is returned unchanged.
+uint64_t sleep_fallback_timer_us(uint64_t timer_us, bool degraded, uint64_t fallback_us);
+
+// How long to stay awake after this boot before the gate may sleep again:
+// a power-on/reset keeps the console window (cold_hold_ms); a wake from a
+// degraded sleep stays up for poll_window_ms so the readers poll at least
+// once (the fallback timer exists for exactly that poll); any other wake 0.
+uint32_t sleep_boot_hold_ms(bool cold, bool degraded_wake, uint32_t cold_hold_ms,
+                            uint32_t poll_window_ms);
+
 // Timer wake duration: until due_us (RTC µs), clamped to [min_us, max_us].
 // A due time already past gives min_us (wake again almost at once). With
 // min_us > max_us, max_us wins (the cap is applied last).
@@ -72,17 +85,26 @@ sleep_wake_t sleep_boot(void);
 // the bolt engaged and settled: the lock must not be driven again.
 bool sleep_resumed_locked(void);
 
-// Enters deep sleep, never returns. Pins in hold_low / hold_high are driven
-// and held through sleep (negative entries are skipped). wake_mask: RTC
-// GPIOs that wake on a high level (ext1, 0 = none); exit_gpio: one RTC GPIO
-// that wakes on a LOW level (ext0, the active-low exit button; -1 = none);
-// timer_us: 0 = no timer.
+// True when this boot is a wake from a degraded sleep (sleep_fallback_timer_us):
+// the caller stays awake for one poll window (sleep_boot_hold_ms).
+bool sleep_degraded_wake(void);
+
+// Enters deep sleep. Wake sources are armed FIRST; only then are the pins
+// in hold_low / hold_high driven and held (negative entries are skipped).
+// wake_mask: RTC GPIOs that wake on a high level (ext1, 0 = none);
+// pir_dropped: a configured PIR was left out of wake_mask (stuck);
+// exit_gpio: one RTC GPIO that wakes on a LOW level (ext0, the active-low
+// exit button; -1 = none); timer_us: 0 = no timer.
+// A dropped PIR or a refused ext0/ext1 makes the sleep degraded: the timer
+// is capped (sleep_fallback_timer_us, 60 s) and the next wake polls once.
 // bolt_engaged: the bolt is engaged and settled. Only then does the next
 // wake skip the boot engage; false makes that wake engage (fail-secure).
-void sleep_enter(bool bolt_engaged, uint64_t wake_mask, int exit_gpio, uint64_t timer_us,
-                 const int *hold_low,
-                 size_t n_low,
-                 const int *hold_high, size_t n_high) __attribute__((__noreturn__));
+// Returns false — WITHOUT sleeping, no pin held — when the timer a sleep
+// needs cannot be armed; the caller stays awake and retries later.
+// Otherwise it does not return.
+bool sleep_enter(bool bolt_engaged, uint64_t wake_mask, bool pir_dropped, int exit_gpio,
+                 uint64_t timer_us, const int *hold_low, size_t n_low, const int *hold_high,
+                 size_t n_high);
 
 #ifdef __cplusplus
 }

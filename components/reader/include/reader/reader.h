@@ -83,6 +83,8 @@ typedef struct {
     bool motion_seen;        // any motion (PIR or a card) since boot/wake
     uint32_t last_motion_ms; // uptime ms of the last motion
     uint64_t wake_mask;      // GPIO mask of the usable PIRs (ext1 wakeup)
+    bool pir_dropped;        // a configured PIR is stuck and left out of
+                             // wake_mask: the sleep must use the fallback timer
 } reader_presence_t;
 
 void reader_presence(reader_presence_t *out);

@@ -40,17 +40,16 @@ static void servo_power(bool on)
 // rail alone. Deadline, check and release writes share s_move_lock.
 // A mutex, not a spinlock: ledc_set_duty may block (fade semaphore), and the
 // callback runs in the esp_timer task, where a short block is allowed.
-#define NO_RELEASE INT64_MAX
 static StaticSemaphore_t s_move_lock_buf;
 static SemaphoreHandle_t s_move_lock;
-static int64_t s_release_at_us = NO_RELEASE;
+static int64_t s_release_at_us = LOCK_NO_RELEASE;
 
 static void release_cb(void *arg)
 {
     (void)arg;
     xSemaphoreTake(s_move_lock, portMAX_DELAY);
-    if (esp_timer_get_time() >= s_release_at_us) {
-        s_release_at_us = NO_RELEASE;
+    if (lock_release_due(esp_timer_get_time(), s_release_at_us)) { // host-tested
+        s_release_at_us = LOCK_NO_RELEASE;
         // No pulse = no holding current (and no hum). The bolt position is
         // mechanical; a bolt that can be pushed back sets LOCK_SERVO_RELEASE=n.
         ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
@@ -115,7 +114,7 @@ void lock_esp_init(void)
     // The output register is set to the ENGAGED level BEFORE the pin turns
     // into an output: an active-low relay would otherwise see the default
     // low level as a command glitch at boot. Boot = engaged is §2.8 anyway.
-    gpio_set_level(CONFIG_LOCK_RELAY_GPIO, CONFIG_LOCK_RELAY_ACTIVE ? 1 : 0);
+    gpio_set_level(CONFIG_LOCK_RELAY_GPIO, CONFIG_LOCK_RELAY_ACTIVE ? 0 : 1); // engaged = inactive
     gpio_config_t io = {
         .pin_bit_mask = 1ULL << CONFIG_LOCK_RELAY_GPIO,
         .mode = GPIO_MODE_OUTPUT,
@@ -150,7 +149,7 @@ void lock_esp_servo_write(uint32_t pulse_us)
         esp_timer_stop(s_release_timer);
     }
     xSemaphoreTake(s_move_lock, portMAX_DELAY);
-    s_release_at_us = NO_RELEASE;
+    s_release_at_us = LOCK_NO_RELEASE;
 #if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
     bool power_up = !s_pwr_on;
     if (power_up) {

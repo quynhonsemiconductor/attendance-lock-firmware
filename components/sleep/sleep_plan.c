@@ -38,6 +38,23 @@ const char *sleep_verdict_name(sleep_verdict_t v)
     return "?";
 }
 
+uint64_t sleep_fallback_timer_us(uint64_t timer_us, bool degraded, uint64_t fallback_us)
+{
+    if (degraded && (timer_us == 0 || timer_us > fallback_us)) {
+        return fallback_us;
+    }
+    return timer_us;
+}
+
+uint32_t sleep_boot_hold_ms(bool cold, bool degraded_wake, uint32_t cold_hold_ms,
+                            uint32_t poll_window_ms)
+{
+    if (cold) {
+        return cold_hold_ms;
+    }
+    return degraded_wake ? poll_window_ms : 0;
+}
+
 uint64_t sleep_timer_us(uint64_t now_us, uint64_t due_us, uint64_t min_us, uint64_t max_us)
 {
     uint64_t d = due_us > now_us ? due_us - now_us : 0;

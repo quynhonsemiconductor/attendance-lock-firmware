@@ -509,6 +509,12 @@ void sync_port_task_start(void)
         s_sched.fails = 0;
         s_sched.due_us = 0; // due now
     }
+    // A "never due" left by an earlier boot whose allocation failed survives
+    // deep sleep with the rest of s_sched: this boot starts fine, so the
+    // session is due now — otherwise sync would never run until power-off.
+    if (s_sched.due_us == UINT64_MAX) {
+        s_sched.due_us = 0;
+    }
     // An allocation failure means no sync at all. The sleep gate must then
     // see "no session ever due" — not "due now" (a 1 s timer wake, i.e. a
     // reboot every second) and not a lock nobody gives back (never sleeps):

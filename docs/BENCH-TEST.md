@@ -119,7 +119,8 @@ only for a move: EN high, 20 ms, the pulse, then pulse and EN off after
 | # | Action | Expected |
 |---|---|---|
 | S7 | Awake, press KEY1 | `exit_button allow`, releases, relocks after the hold |
-| S8 | Asleep, press KEY1 | `wake: exit button`, release within ~0.5 s, back to sleep after the relock |
+| S8 | Asleep, press KEY1 | `wake: exit button`, release within ~0.5 s, back to sleep after the relock. Confirms ext0 + ext1 armed together on this target: the pre-sleep line must NOT say `degraded`, and no `ext0 wakeup ... refused` |
+| S8b | Cover one PIR with a warm hand > 60 s (stuck), walk away | `pir: GPIO.. high for 60 s`, then `deep sleep ... (degraded: fallback timer)` with timer 60 s, then `wake after a degraded sleep` and one poll before it sleeps again |
 | S9 | Hold KEY1 for > 60 s | one release, then `exit button held 60 s: stuck?`; the chip sleeps again |
 | S10 | Meter on the servo 6 V between moves and in sleep | ~0 mA (EN low); servo still moves on every allow |
 

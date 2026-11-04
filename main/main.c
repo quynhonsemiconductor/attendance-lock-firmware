@@ -267,6 +267,8 @@ static void on_fault_post(uint8_t reader)
 #if CONFIG_SLEEP_DEEP_ENABLE
 static sleep_wake_t s_wake;
 static sleep_verdict_t s_last_verdict = SLEEP_GO;
+static uint32_t s_sleep_retry_ms; // after a refused sleep: no new try before this
+static bool s_sleep_retry_set;
 
 // Deep-sleep gate (battery work 2026-11-03), run every door-task tick. The
 // chip sleeps only with the bolt engaged and settled, no feedback running,
@@ -299,7 +301,12 @@ static void maybe_sleep(void)
         .motion_seen = pres.motion_seen,
         .last_motion_ms = pres.last_motion_ms,
         .awake_ms = CONFIG_READER_PIR_ACTIVE_MS,
-        .boot_hold_ms = s_wake == SLEEP_WAKE_COLD ? CONFIG_SLEEP_BOOT_AWAKE_S * 1000u : 0,
+        // Cold boot: the console window. Wake from a degraded sleep: one
+        // poll window (fallback idle poll + a fast poll) so the readers do
+        // poll before the next sleep — that poll is the fallback's point.
+        .boot_hold_ms = sleep_boot_hold_ms(s_wake == SLEEP_WAKE_COLD, sleep_degraded_wake(),
+                                           CONFIG_SLEEP_BOOT_AWAKE_S * 1000u,
+                                           CONFIG_READER_IDLE_POLL_MS + CONFIG_READER_POLL_MS),
         .console_seen = console_seen,
         .console_last_ms = console_ms,
         .console_hold_ms = CONFIG_SLEEP_CONSOLE_IDLE_S * 1000u,
@@ -308,6 +315,9 @@ static void maybe_sleep(void)
     if (v != SLEEP_GO) {
         s_last_verdict = v;
         return;
+    }
+    if (s_sleep_retry_set && (int32_t)(t - s_sleep_retry_ms) < 0) {
+        return; // the last sleep was refused: do not retry every 50 ms tick
     }
     // Stop the other tasks between two steps: sync first (non-blocking),
     // then the reader (waits for a running poll). Past the queue re-check
@@ -374,9 +384,16 @@ static void maybe_sleep(void)
     // The bolt state is passed, not assumed: only a sleep with the bolt
     // engaged and settled lets the next wake skip the boot engage.
     bool bolt_engaged = s_lock_engaged && (int32_t)(now_ms() - s_servo_until_ms) >= 0;
-    sleep_enter(bolt_engaged, pres.wake_mask, exit_gpio, timer_us, hold_low,
-                sizeof(hold_low) / sizeof(hold_low[0]), hold_high,
-                sizeof(hold_high) / sizeof(hold_high[0]));
+    if (!sleep_enter(bolt_engaged, pres.wake_mask, pres.pir_dropped, exit_gpio, timer_us,
+                     hold_low, sizeof(hold_low) / sizeof(hold_low[0]), hold_high,
+                     sizeof(hold_high) / sizeof(hold_high[0]))) {
+        // The timer could not be armed (nothing was held): stay awake,
+        // give the tasks back and try again in 10 s.
+        reader_sleep_cancel();
+        sync_sleep_cancel();
+        s_sleep_retry_ms = now_ms() + 10000u;
+        s_sleep_retry_set = true;
+    }
 }
 #endif
 

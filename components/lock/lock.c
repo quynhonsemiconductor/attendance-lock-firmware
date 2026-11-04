@@ -29,10 +29,9 @@ void lock_resume(void)
     lock_engage();
 #endif
 #if CONFIG_LOCK_BACKEND_RELAY
-    // lock_esp_init presets the relay pin to the ACTIVE (release) level;
-    // lock_init masks that with lock_engage(). A resume must drive the
-    // engaged level itself (fail-secure, §2.8). Driving a relay to the
-    // level it already holds is not a move, so this is safe after sleep.
+    // lock_esp_init already presets the engaged (inactive) level before the
+    // pin turns into an output; driving it again is explicit fail-secure
+    // (§2.8) and not a move.
     lock_esp_relay_write(0);
 #endif
 }
