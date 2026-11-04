@@ -47,8 +47,12 @@ config READER_CROSS_READ_MS
 config READER_PIR_GPIO
     int "PIR presence sensor GPIO (-1 = no PIR: poll every READER_POLL_MS)"
     default -1
-    range -1 48
+    range -1 21
     help
+        Must be an RTC GPIO (ESP32-S3: 0-21): deep sleep wakes on it (ext1),
+        which refuses any other pin — the range makes that a config error
+        instead of a door that silently never wakes.
+
         Battery work 2026-11-01: an AM312 PIR (push-pull, ~3.3 V high while it
         sees motion, ~2 s retriggerable hold) gates the card polls. Motion
         wakes the chip (GPIO light-sleep wakeup) and starts fast polling;
@@ -59,13 +63,24 @@ config READER_PIR_GPIO
 config READER_PIR2_GPIO
     int "Second (inside) PIR GPIO (-1 = none)"
     default -1
-    range -1 48
+    range -1 21
     depends on READER_PIR_GPIO >= 0
     help
         Same behaviour as READER_PIR_GPIO; either PIR starts fast polling
         (both readers) and either wakes the chip from deep sleep. Bench
         wiring (2026-11-03): inside PIR on KSDA -> GPIO8. For deep sleep both
         must be RTC GPIOs (ESP32-S3: 0-21).
+
+config READER_PIR_STUCK_S
+    int "A PIR high this long without a break is ignored (s)"
+    default 60
+    range 10 3600
+    depends on READER_PIR_GPIO >= 0
+    help
+        A stuck-high PIR (heat source in view, wiring fault) would keep the
+        readers in fast polling and, with deep sleep, the chip awake forever
+        (ext1 wakes on a high level). Past this time it stops counting as
+        motion and is left out of the wake mask until it drops again.
 
 config READER_PIR_ACTIVE_MS
     int "Fast polling continues this long after the PIR was last high (ms)"

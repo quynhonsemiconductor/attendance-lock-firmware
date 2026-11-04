@@ -115,11 +115,6 @@ bool sleep_resumed_locked(void)
     return s_resumed_locked;
 }
 
-uint64_t sleep_wake_pins(void)
-{
-    return s_wake_pins;
-}
-
 static uint64_t hold_pins(const int *pins, size_t n, int level)
 {
     uint64_t mask = 0;
@@ -141,14 +136,14 @@ static uint64_t hold_pins(const int *pins, size_t n, int level)
     return mask;
 }
 
-void sleep_enter(uint64_t wake_mask, int exit_gpio, uint64_t timer_us, const int *hold_low,
-                 size_t n_low, const int *hold_high, size_t n_high)
+void sleep_enter(bool bolt_engaged, uint64_t wake_mask, int exit_gpio, uint64_t timer_us,
+                 const int *hold_low, size_t n_low, const int *hold_high, size_t n_high)
 {
     s_rtc.magic = SLEEP_MAGIC;
     s_rtc.held_low = hold_pins(hold_low, n_low, 0);
     s_rtc.held_high = hold_pins(hold_high, n_high, 1);
     gpio_deep_sleep_hold_en();
-    s_rtc.locked = 1; // the caller only sleeps with the bolt engaged
+    s_rtc.locked = bolt_engaged ? 1 : 0; // only 1 skips the next boot engage
     s_rtc.sleeps++;
 
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);

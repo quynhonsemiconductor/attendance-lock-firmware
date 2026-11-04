@@ -49,7 +49,8 @@ sleep_verdict_t sleep_decide(const sleep_inputs_t *in);
 const char *sleep_verdict_name(sleep_verdict_t v);
 
 // Timer wake duration: until due_us (RTC µs), clamped to [min_us, max_us].
-// A due time already past gives min_us (wake again almost at once).
+// A due time already past gives min_us (wake again almost at once). With
+// min_us > max_us, max_us wins (the cap is applied last).
 uint64_t sleep_timer_us(uint64_t now_us, uint64_t due_us, uint64_t min_us, uint64_t max_us);
 
 // --- device ------------------------------------------------------------
@@ -71,17 +72,15 @@ sleep_wake_t sleep_boot(void);
 // the bolt engaged and settled: the lock must not be driven again.
 bool sleep_resumed_locked(void);
 
-// GPIO mask of the PIRs that triggered an ext1 wake (0 otherwise).
-uint64_t sleep_wake_pins(void);
-
 // Enters deep sleep, never returns. Pins in hold_low / hold_high are driven
 // and held through sleep (negative entries are skipped). wake_mask: RTC
 // GPIOs that wake on a high level (ext1, 0 = none); exit_gpio: one RTC GPIO
 // that wakes on a LOW level (ext0, the active-low exit button; -1 = none);
 // timer_us: 0 = no timer.
-// The caller only sleeps with the bolt engaged and settled — the next wake
-// skips the boot engage on the strength of that.
-void sleep_enter(uint64_t wake_mask, int exit_gpio, uint64_t timer_us, const int *hold_low,
+// bolt_engaged: the bolt is engaged and settled. Only then does the next
+// wake skip the boot engage; false makes that wake engage (fail-secure).
+void sleep_enter(bool bolt_engaged, uint64_t wake_mask, int exit_gpio, uint64_t timer_us,
+                 const int *hold_low,
                  size_t n_low,
                  const int *hold_high, size_t n_high) __attribute__((__noreturn__));
 

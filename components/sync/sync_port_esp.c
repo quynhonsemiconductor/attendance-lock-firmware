@@ -415,7 +415,8 @@ static RTC_NOINIT_ATTR struct {
     uint32_t magic;
     uint32_t fails;
     uint64_t due_us; // RTC µs
-} s_sched;
+} s_sched; // fails (backoff) deliberately survives deep-sleep wakes;
+           // any other boot resets it in sync_port_task_start()
 
 static SemaphoreHandle_t s_session_lock; // held for one session; sleep takes it
 static volatile bool s_session_running;
@@ -430,7 +431,18 @@ bool sync_busy(void)
     if (s_session_lock == NULL) {
         return false; // no task (sync never started): nothing to wait for
     }
-    return s_session_running || rtc_now_us() >= s_sched.due_us;
+    if (s_session_running) {
+        return true;
+    }
+    // due_us is 64-bit (two 32-bit stores on Xtensa) written by the sync
+    // task under the lock: read it under the lock too, so a torn word can
+    // never fake a far-future due time. Lock held = a session is running.
+    if (xSemaphoreTake(s_session_lock, 0) != pdTRUE) {
+        return true;
+    }
+    bool due = rtc_now_us() >= s_sched.due_us;
+    xSemaphoreGive(s_session_lock);
+    return due;
 }
 
 uint64_t sync_next_due_rtc_us(void)
@@ -497,12 +509,23 @@ void sync_port_task_start(void)
         s_sched.fails = 0;
         s_sched.due_us = 0; // due now
     }
-    s_session_lock = xSemaphoreCreateMutex();
-    if (s_session_lock == NULL) {
+    // An allocation failure means no sync at all. The sleep gate must then
+    // see "no session ever due" — not "due now" (a 1 s timer wake, i.e. a
+    // reboot every second) and not a lock nobody gives back (never sleeps):
+    // lock NULL + due at the far future = sleep on PIR wakes, 24 h timer cap.
+    SemaphoreHandle_t lock = xSemaphoreCreateMutex();
+    if (lock == NULL) {
         ESP_LOGE(TAG, "session lock alloc failed — no sync");
+        s_sched.due_us = UINT64_MAX;
         return;
     }
+    s_session_lock = lock;
     // ≥ 10 KiB: the TLS handshake peaks deep in mbedtls; verified against
     // uxTaskGetStackHighWaterMark on the target during bench bring-up.
-    xTaskCreate(sync_task, "sync", 10240, NULL, tskIDLE_PRIORITY + 2, NULL);
+    if (xTaskCreate(sync_task, "sync", 10240, NULL, tskIDLE_PRIORITY + 2, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "sync task create failed — no sync");
+        s_session_lock = NULL;
+        vSemaphoreDelete(lock);
+        s_sched.due_us = UINT64_MAX;
+    }
 }

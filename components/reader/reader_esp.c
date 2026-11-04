@@ -13,7 +13,7 @@
 // sleep wakeup and a level interrupt that notifies this task, so the first
 // poll after motion runs at once. The interrupt and the wakeup are disarmed
 // while the level stays high (a level source would fire / wake continuously)
-// and re-armed when it drops. A PIR stuck high for SLEEP_PIR_STUCK_S stops
+// and re-armed when it drops. A PIR stuck high for READER_PIR_STUCK_S stops
 // counting as motion (it would keep the chip awake forever).
 //
 // Deep sleep (SLEEP_DEEP_ENABLE): the door task reads reader_presence() to
@@ -79,11 +79,9 @@ static const int k_pir_gpio[PIR_COUNT] = { CONFIG_READER_PIR_GPIO, CONFIG_READER
 static const int k_pir_gpio[PIR_COUNT] = { CONFIG_READER_PIR_GPIO };
 #endif
 
-#if defined(CONFIG_SLEEP_PIR_STUCK_S)
-#define PIR_STUCK_MS ((uint32_t)CONFIG_SLEEP_PIR_STUCK_S * 1000u)
-#else
-#define PIR_STUCK_MS 0u // never stuck: the old single-PIR behaviour
-#endif
+// Declared in the reader's own Kconfig (depends only on a PIR existing), so
+// stuck detection holds with deep sleep off too.
+#define PIR_STUCK_MS ((uint32_t)CONFIG_READER_PIR_STUCK_S * 1000u)
 
 typedef struct {
     gpio_num_t gpio;
@@ -175,6 +173,9 @@ static reader_scan_plan_t pir_update(void)
         }
         bool fired = p->fired;
         if (fired) {
+            // Publish before consuming: reader_presence() must never see
+            // fired cleared, the level low and motion_seen still false.
+            note_motion(t);
             p->fired = false;
             p->armed = true; // the ISR only disabled the interrupt —
             pir_arm(p, false); // finish the disarm (light-sleep wakeup too)
@@ -270,7 +271,8 @@ bool reader_sleep_prepare(uint32_t timeout_ms)
         return false;
     }
     // Between polls both readers are already in hard power-down (RST low);
-    // the deep-sleep entry holds RST low. Kept: s_poll_lock (never resumes).
+    // the deep-sleep entry holds RST low. Kept: s_poll_lock, until deep
+    // sleep restarts the firmware or reader_sleep_cancel() gives it back.
 #if CONFIG_READER_PIR_GPIO >= 0
     for (int i = 0; i < PIR_COUNT; i++) {
         if (s_pir[i].ok) {
@@ -279,6 +281,21 @@ bool reader_sleep_prepare(uint32_t timeout_ms)
     }
 #endif
     return true;
+}
+
+void reader_sleep_cancel(void)
+{
+    if (s_poll_lock == NULL) {
+        return;
+    }
+#if CONFIG_READER_PIR_GPIO >= 0
+    for (int i = 0; i < PIR_COUNT; i++) {
+        if (s_pir[i].ok && s_pir[i].armed) {
+            gpio_intr_enable(s_pir[i].gpio); // prepare only disabled it
+        }
+    }
+#endif
+    xSemaphoreGive(s_poll_lock);
 }
 
 static void poll_loop(void *arg)

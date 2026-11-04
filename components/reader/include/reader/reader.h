@@ -89,9 +89,14 @@ void reader_presence(reader_presence_t *out);
 
 // Stops the poll task between two polls (both readers left in hard
 // power-down) before deep sleep. Waits up to timeout_ms for a running poll
-// to finish. Never resumes: deep sleep restarts the firmware. False = the
-// poll did not finish in time (stay awake, try again later).
+// to finish. False = the poll did not finish in time (stay awake, try again
+// later).
 bool reader_sleep_prepare(uint32_t timeout_ms);
+
+// Undoes a successful reader_sleep_prepare() when the sleep is called off
+// after it (a tap landed during the last poll pass): re-enables the PIR
+// interrupts that were armed and lets the poll task run again.
+void reader_sleep_cancel(void);
 
 #ifdef __cplusplus
 }

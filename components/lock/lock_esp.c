@@ -8,6 +8,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "lock/lock_math.h"
@@ -30,22 +31,39 @@ static void servo_power(bool on)
 }
 #endif
 
+// Move generation: esp_timer_stop() cannot recall a release callback the
+// esp_timer task has already dispatched (it may run on the other core). Each
+// move bumps s_move_gen; the release armed for an older move sees the
+// mismatch and leaves the new pulse and the rail alone. The check and the
+// release writes share s_move_lock, so a move cannot slip in between them.
+// A mutex, not a spinlock: ledc_set_duty may block (fade semaphore), and the
+// callback runs in the esp_timer task, where a short block is allowed.
+static StaticSemaphore_t s_move_lock_buf;
+static SemaphoreHandle_t s_move_lock;
+static uint32_t s_move_gen;
+static uint32_t s_release_gen;
+
 static void release_cb(void *arg)
 {
     (void)arg;
-    // No pulse = no holding current (and no hum). The bolt position is
-    // mechanical; a bolt that can be pushed back sets LOCK_SERVO_RELEASE=n.
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    xSemaphoreTake(s_move_lock, portMAX_DELAY);
+    if (s_release_gen == s_move_gen) {
+        // No pulse = no holding current (and no hum). The bolt position is
+        // mechanical; a bolt that can be pushed back sets LOCK_SERVO_RELEASE=n.
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 #if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
-    servo_power(false); // pulse first, then the rail: no half-powered twitch
+        servo_power(false); // pulse first, then the rail: no half-powered twitch
 #endif
+    }
+    xSemaphoreGive(s_move_lock);
 }
 #endif
 
 void lock_esp_init(void)
 {
 #if CONFIG_LOCK_BACKEND_SERVO
+    s_move_lock = xSemaphoreCreateMutexStatic(&s_move_lock_buf); // static: cannot fail
 #if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
     // Off before the pin turns into an output (the board's pull keeps the
     // MOSFET off until then): the boot engage powers it on for its move.
@@ -120,17 +138,27 @@ void lock_esp_servo_write(uint32_t pulse_us)
     // there, not twice.
     uint32_t duty =
         lock_servo_duty_ticks(pulse_us, CONFIG_LOCK_SERVO_FREQ, 14);
-#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
-    // A pending release of the previous move must not cut the power of this
-    // one: stop it first (lock_esp_servo_release_after re-arms it).
+    // A pending release of the previous move must not zero this pulse or
+    // cut this move's power: stop it, and retire it by generation in case it
+    // already fired (lock_esp_servo_release_after re-arms for this move).
     if (s_release_timer != NULL) {
         esp_timer_stop(s_release_timer);
     }
-    if (!s_pwr_on) {
+    xSemaphoreTake(s_move_lock, portMAX_DELAY);
+    s_move_gen++;
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
+    bool power_up = !s_pwr_on;
+    if (power_up) {
         servo_power(true);
-#if CONFIG_LOCK_SERVO_PWR_LEAD_MS > 0
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_LOCK_SERVO_PWR_LEAD_MS) ? pdMS_TO_TICKS(CONFIG_LOCK_SERVO_PWR_LEAD_MS) : 1);
+    }
 #endif
+    xSemaphoreGive(s_move_lock);
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0 && CONFIG_LOCK_SERVO_PWR_LEAD_MS > 0
+    if (power_up) {
+        // pdMS_TO_TICKS rounds down: a lead shorter than one tick would
+        // become a 0-tick delay and skip the rail settle time entirely.
+        const TickType_t lead = pdMS_TO_TICKS(CONFIG_LOCK_SERVO_PWR_LEAD_MS);
+        vTaskDelay(lead ? lead : 1);
     }
 #endif
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
@@ -143,6 +171,9 @@ void lock_esp_servo_release_after(uint32_t move_ms)
         return;
     }
     esp_timer_stop(s_release_timer); // restartable: engage→release→engage
+    xSemaphoreTake(s_move_lock, portMAX_DELAY);
+    s_release_gen = s_move_gen; // this release belongs to the latest move
+    xSemaphoreGive(s_move_lock);
     esp_timer_start_once(s_release_timer, (uint64_t)move_ms * 1000);
 }
 #endif

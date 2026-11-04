@@ -19,16 +19,17 @@ config DOOR_FEEDBACK_GPIO_BUZZER
 config DOOR_EXIT_GPIO
     int "Inside exit button GPIO (-1 = none; active low)"
     default -1
-    range -1 48
+    range -1 21
     help
         KEY1 on the main board (2026-11-03): GPIO6, 10k pull-up to 3.3 V,
         100 nF to GND, the button shorts to GND. A press releases the bolt
         like an allowed tap (same hold window, green + single beep), once
         per press. SECURITY.md states free egress is mechanical (inside
         handle): this button is an ADDITIONAL egress and is off (-1) in the
-        default profile until that decision is revisited. With deep sleep
-        it must be an RTC GPIO (ESP32-S3: 0-21): it wakes the chip (ext0,
-        level low) and the wake itself counts as the press.
+        default profile until that decision is revisited. It must be an RTC
+        GPIO (ESP32-S3: 0-21, enforced by the range): in deep sleep it wakes
+        the chip (ext0, level low, which refuses any other pin) and the wake
+        itself counts as the press.
 
 config DOOR_EXIT_DEBOUNCE_MS
     int "Exit button debounce (ms)"

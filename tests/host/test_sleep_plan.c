@@ -105,6 +105,10 @@ static void test_timer_until_due_clamped(void)
     TEST_ASSERT_EQUAL_UINT64(s, sleep_timer_us(10 * s, 5 * s, s, 86400 * s)); // past due
     TEST_ASSERT_EQUAL_UINT64(s, sleep_timer_us(10 * s, 10 * s, s, 86400 * s));
     TEST_ASSERT_EQUAL_UINT64(86400 * s, sleep_timer_us(0, 200000 * s, s, 86400 * s));
+    // sync never started (due at the far future): the daily cap, not a 1 s loop
+    TEST_ASSERT_EQUAL_UINT64(86400 * s, sleep_timer_us(10 * s, UINT64_MAX, s, 86400 * s));
+    // degenerate min > max: max wins (documented in sleep.h)
+    TEST_ASSERT_EQUAL_UINT64(5 * s, sleep_timer_us(10 * s, 11 * s, 30 * s, 5 * s));
 }
 
 static void test_verdict_names(void)

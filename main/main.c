@@ -310,9 +310,8 @@ static void maybe_sleep(void)
         return;
     }
     // Stop the other tasks between two steps: sync first (non-blocking),
-    // then the reader (waits for a running poll). Past the reader there is
-    // no way back — its task stays parked (and would trip the watchdog),
-    // so nothing after it may fail.
+    // then the reader (waits for a running poll). Past the queue re-check
+    // below there is no way back, so nothing after it may fail.
     if (!sync_sleep_prepare()) {
         return; // a session started meanwhile
     }
@@ -320,11 +319,26 @@ static void maybe_sleep(void)
         sync_sleep_cancel();
         return;
     }
+    // The reader is parked and can no longer post. Anything queued now came
+    // from the poll pass the park waited for (or a fault post): a person at
+    // the door. Call the sleep off; the next tick handles it with full
+    // feedback.
+    if (uxQueueMessagesWaiting(s_taps) != 0) {
+        reader_sleep_cancel();
+        sync_sleep_cancel();
+        return;
+    }
     feedback_off();
     reader_presence(&pres); // fresh mask: a PIR may have gone stuck meanwhile
+    // Timer floor 1 s: a session that is already due wakes the chip almost
+    // at once (the gate saw it as not due a moment ago; it is not worth a
+    // way back from here). Cap 24 h: a sanity bound — a schedule further
+    // out than that (e.g. sync failed to start) still gets a daily wake.
+    const uint64_t k_timer_min_us = 1000000ull;
+    const uint64_t k_timer_max_us = 24ull * 3600u * 1000000u;
     uint64_t now_rtc = esp_rtc_get_time_us();
     uint64_t timer_us =
-        sleep_timer_us(now_rtc, sync_next_due_rtc_us(), 1000000ull, 24ull * 3600u * 1000000u);
+        sleep_timer_us(now_rtc, sync_next_due_rtc_us(), k_timer_min_us, k_timer_max_us);
     ESP_LOGI(TAG, "idle (last stay: %s, uptime %u ms) -> deep sleep",
              sleep_verdict_name(s_last_verdict), (unsigned)t);
     // RST low = RC522 hard power-down; CS high = deselected; the servo
@@ -358,7 +372,10 @@ static void maybe_sleep(void)
     };
     // A PIR that went high since the gate is still in the mask: ext1 then
     // wakes the chip at once, which costs one boot, never a missed person.
-    sleep_enter(pres.wake_mask, exit_gpio, timer_us, hold_low,
+    // The bolt state is passed, not assumed: only a sleep with the bolt
+    // engaged and settled lets the next wake skip the boot engage.
+    bool bolt_engaged = s_lock_engaged && (int32_t)(now_ms() - s_servo_until_ms) >= 0;
+    sleep_enter(bolt_engaged, pres.wake_mask, exit_gpio, timer_us, hold_low,
                 sizeof(hold_low) / sizeof(hold_low[0]), hold_high,
                 sizeof(hold_high) / sizeof(hold_high[0]));
 }

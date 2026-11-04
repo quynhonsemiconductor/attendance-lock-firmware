@@ -112,8 +112,15 @@ static volatile uint32_t s_input_ms;
 
 bool provision_console_last_input(uint32_t *last_ms)
 {
+    // Flag first: read_line stores s_input_ms BEFORE setting s_input_seen,
+    // so seen == true guarantees a valid timestamp (never the boot-time 0,
+    // which would read as long idle and let the chip sleep mid-typing).
+    if (!s_input_seen) {
+        *last_ms = 0;
+        return false;
+    }
     *last_ms = s_input_ms;
-    return s_input_seen;
+    return true;
 }
 
 static size_t read_line(char *buf, size_t cap)
@@ -127,7 +134,7 @@ static size_t read_line(char *buf, size_t cap)
             continue;
         }
         s_input_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        s_input_seen = true;
+        s_input_seen = true; // after the timestamp: see provision_console_last_input
         if (c == '\r' || c == '\n') {
             if (c == '\n' && n == 0 && skip_lf) {
                 skip_lf = false; // the LF of a CR LF pair
