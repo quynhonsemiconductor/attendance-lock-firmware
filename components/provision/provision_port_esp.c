@@ -107,20 +107,22 @@ bool provision_port_allow_http(void)
 // the LF that starts the next line.
 static bool skip_lf;
 
-static volatile bool s_input_seen;
-static volatile uint32_t s_input_ms;
+// Written by the console task, read by the door task (possibly on the
+// other core): both sides go through s_input_mux, so the pair is consistent.
+static portMUX_TYPE s_input_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_input_seen;
+static uint32_t s_input_ms;
 
 bool provision_console_last_input(uint32_t *last_ms)
 {
-    // Flag first: read_line stores s_input_ms BEFORE setting s_input_seen,
-    // so seen == true guarantees a valid timestamp (never the boot-time 0,
+    // seen == true always comes with its timestamp (never the boot-time 0,
     // which would read as long idle and let the chip sleep mid-typing).
-    if (!s_input_seen) {
-        *last_ms = 0;
-        return false;
-    }
-    *last_ms = s_input_ms;
-    return true;
+    portENTER_CRITICAL(&s_input_mux);
+    bool seen = s_input_seen;
+    uint32_t ms = s_input_ms;
+    portEXIT_CRITICAL(&s_input_mux);
+    *last_ms = seen ? ms : 0;
+    return seen;
 }
 
 static size_t read_line(char *buf, size_t cap)
@@ -133,8 +135,11 @@ static size_t read_line(char *buf, size_t cap)
             vTaskDelay(pdMS_TO_TICKS(20)); // between characters: yield
             continue;
         }
-        s_input_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        s_input_seen = true; // after the timestamp: see provision_console_last_input
+        uint32_t input_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        portENTER_CRITICAL(&s_input_mux);
+        s_input_ms = input_ms;
+        s_input_seen = true;
+        portEXIT_CRITICAL(&s_input_mux);
         if (c == '\r' || c == '\n') {
             if (c == '\n' && n == 0 && skip_lf) {
                 skip_lf = false; // the LF of a CR LF pair

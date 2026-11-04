@@ -368,7 +368,6 @@ static void maybe_sleep(void)
 #if CONFIG_LOCK_BACKEND_SERVO && CONFIG_LOCK_SERVO_PWR_GPIO >= 0 && !CONFIG_LOCK_SERVO_PWR_ACTIVE
         CONFIG_LOCK_SERVO_PWR_GPIO, // active-low enable: servo rail off
 #endif
-        -1, // keeps the array non-empty in every configuration
     };
     // A PIR that went high since the gate is still in the mask: ext1 then
     // wakes the chip at once, which costs one boot, never a missed person.

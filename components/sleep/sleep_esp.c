@@ -128,9 +128,17 @@ static uint64_t hold_pins(const int *pins, size_t n, int level)
             .pin_bit_mask = 1ULL << pin,
             .mode = GPIO_MODE_OUTPUT, // also detaches a peripheral (LEDC)
         };
-        (void)gpio_config(&io);
+        esp_err_t err = gpio_config(&io);
         gpio_set_level((gpio_num_t)pin, level);
-        (void)gpio_hold_en((gpio_num_t)pin);
+        if (err == ESP_OK) {
+            err = gpio_hold_en((gpio_num_t)pin);
+        }
+        if (err != ESP_OK) {
+            // Floats through sleep (servo twitch / half-driven buzzer risk):
+            // say so, and leave it out of the mask sleep_boot releases.
+            ESP_LOGE(TAG, "GPIO%d hold at %d failed (%s)", pin, level, esp_err_to_name(err));
+            continue;
+        }
         mask |= 1ULL << pin;
     }
     return mask;
@@ -146,16 +154,31 @@ void sleep_enter(bool bolt_engaged, uint64_t wake_mask, int exit_gpio, uint64_t 
     s_rtc.locked = bolt_engaged ? 1 : 0; // only 1 skips the next boot engage
     s_rtc.sleeps++;
 
+    // A wake source that refuses to arm (the Kconfig ranges keep the pins
+    // RTC-capable, so this is a bug, not a config) would leave people at the
+    // door unserved until the next timer wake — up to 24 h. Bound that
+    // outage with a short timer instead: each fallback wake re-polls.
+    const uint64_t k_lost_wake_fallback_us = 60ull * 1000000u;
+    bool lost_wake = false;
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     if (wake_mask != 0 &&
         esp_sleep_enable_ext1_wakeup_io(wake_mask, ESP_EXT1_WAKEUP_ANY_HIGH) != ESP_OK) {
         ESP_LOGE(TAG, "ext1 wakeup on 0x%llx refused", (unsigned long long)wake_mask);
+        wake_mask = 0;
+        lost_wake = true;
     }
     // ext1 is ANY_HIGH for the PIRs; the active-low button needs its own
     // level, which only ext0 gives (it keeps the RTC peripherals powered: a
     // few µA). The board's 10k pull-up holds the pin high while asleep.
     if (exit_gpio >= 0 && esp_sleep_enable_ext0_wakeup((gpio_num_t)exit_gpio, 0) != ESP_OK) {
         ESP_LOGE(TAG, "ext0 wakeup on GPIO%d refused", exit_gpio);
+        exit_gpio = -1;
+        lost_wake = true;
+    }
+    if (lost_wake && (timer_us == 0 || timer_us > k_lost_wake_fallback_us)) {
+        timer_us = k_lost_wake_fallback_us;
+        ESP_LOGW(TAG, "lost wake source: timer fallback %llu s",
+                 (unsigned long long)(timer_us / 1000000u));
     }
     if (timer_us > 0) {
         (void)esp_sleep_enable_timer_wakeup(timer_us);

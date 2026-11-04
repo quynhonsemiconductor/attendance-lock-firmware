@@ -31,23 +31,26 @@ static void servo_power(bool on)
 }
 #endif
 
-// Move generation: esp_timer_stop() cannot recall a release callback the
-// esp_timer task has already dispatched (it may run on the other core). Each
-// move bumps s_move_gen; the release armed for an older move sees the
-// mismatch and leaves the new pulse and the rail alone. The check and the
-// release writes share s_move_lock, so a move cannot slip in between them.
+// Release deadline: esp_timer_stop() cannot recall a release callback the
+// esp_timer task has already dispatched (it may run late, on the other
+// core). Each release records WHEN it is due; a move clears it. A callback
+// acts only once the current deadline has passed, so a stale callback of an
+// older move — before or after the new move re-armed — finds either no
+// deadline or one still in the future, and leaves the new pulse and the
+// rail alone. Deadline, check and release writes share s_move_lock.
 // A mutex, not a spinlock: ledc_set_duty may block (fade semaphore), and the
 // callback runs in the esp_timer task, where a short block is allowed.
+#define NO_RELEASE INT64_MAX
 static StaticSemaphore_t s_move_lock_buf;
 static SemaphoreHandle_t s_move_lock;
-static uint32_t s_move_gen;
-static uint32_t s_release_gen;
+static int64_t s_release_at_us = NO_RELEASE;
 
 static void release_cb(void *arg)
 {
     (void)arg;
     xSemaphoreTake(s_move_lock, portMAX_DELAY);
-    if (s_release_gen == s_move_gen) {
+    if (esp_timer_get_time() >= s_release_at_us) {
+        s_release_at_us = NO_RELEASE;
         // No pulse = no holding current (and no hum). The bolt position is
         // mechanical; a bolt that can be pushed back sets LOCK_SERVO_RELEASE=n.
         ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
@@ -72,7 +75,9 @@ void lock_esp_init(void)
         .pin_bit_mask = 1ULL << CONFIG_LOCK_SERVO_PWR_GPIO,
         .mode = GPIO_MODE_OUTPUT,
     };
-    (void)gpio_config(&pwr);
+    if (gpio_config(&pwr) != ESP_OK) {
+        ESP_LOGE(TAG, "servo power EN GPIO%d config failed", CONFIG_LOCK_SERVO_PWR_GPIO);
+    }
     servo_power(false);
 #endif
     ledc_timer_config_t timer = {
@@ -139,13 +144,13 @@ void lock_esp_servo_write(uint32_t pulse_us)
     uint32_t duty =
         lock_servo_duty_ticks(pulse_us, CONFIG_LOCK_SERVO_FREQ, 14);
     // A pending release of the previous move must not zero this pulse or
-    // cut this move's power: stop it, and retire it by generation in case it
+    // cut this move's power: stop it, and clear its deadline in case it
     // already fired (lock_esp_servo_release_after re-arms for this move).
     if (s_release_timer != NULL) {
         esp_timer_stop(s_release_timer);
     }
     xSemaphoreTake(s_move_lock, portMAX_DELAY);
-    s_move_gen++;
+    s_release_at_us = NO_RELEASE;
 #if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
     bool power_up = !s_pwr_on;
     if (power_up) {
@@ -172,8 +177,10 @@ void lock_esp_servo_release_after(uint32_t move_ms)
     }
     esp_timer_stop(s_release_timer); // restartable: engage→release→engage
     xSemaphoreTake(s_move_lock, portMAX_DELAY);
-    s_release_gen = s_move_gen; // this release belongs to the latest move
-    xSemaphoreGive(s_move_lock);
+    // The timer fires at or after its period, never before: the real
+    // callback always finds now >= the deadline.
+    s_release_at_us = esp_timer_get_time() + (int64_t)move_ms * 1000;
     esp_timer_start_once(s_release_timer, (uint64_t)move_ms * 1000);
+    xSemaphoreGive(s_move_lock);
 }
 #endif

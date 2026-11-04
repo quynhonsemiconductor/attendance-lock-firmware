@@ -134,15 +134,15 @@ void test_scan_plan_survives_ms_clock_wrap(void)
 
 // --- stuck PIR (deep-sleep gate) ------------------------------------------
 
-static void test_pir_stuck_only_after_a_long_unbroken_high(void)
+void test_pir_stuck_only_after_a_long_unbroken_high(void)
 {
     TEST_ASSERT_FALSE(reader_pir_stuck(false, 0, 120000, 60000)); // low: never
     TEST_ASSERT_FALSE(reader_pir_stuck(true, 1000, 60999, 60000));
     TEST_ASSERT_TRUE(reader_pir_stuck(true, 1000, 61000, 60000));
-    TEST_ASSERT_FALSE(reader_pir_stuck(true, 0, 999999, 0)); // 0 = feature off
+    TEST_ASSERT_FALSE(reader_pir_stuck(true, 0, 999999, 0)); // 0 = feature off (READER_PIR_STUCK_S=0)
 }
 
-static void test_pir_stuck_survives_ms_clock_wrap(void)
+void test_pir_stuck_survives_ms_clock_wrap(void)
 {
     TEST_ASSERT_FALSE(reader_pir_stuck(true, 0xFFFFF000u, 0x00001000u, 60000));
     TEST_ASSERT_TRUE(reader_pir_stuck(true, 0xFFFFF000u, 0x00010000u, 60000));

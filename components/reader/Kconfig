@@ -72,9 +72,9 @@ config READER_PIR2_GPIO
         must be RTC GPIOs (ESP32-S3: 0-21).
 
 config READER_PIR_STUCK_S
-    int "A PIR high this long without a break is ignored (s)"
+    int "A PIR high this long without a break is ignored (s, 0 = never)"
     default 60
-    range 10 3600
+    range 0 3600
     depends on READER_PIR_GPIO >= 0
     help
         A stuck-high PIR (heat source in view, wiring fault) would keep the

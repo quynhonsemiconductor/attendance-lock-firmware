@@ -22,6 +22,12 @@ void lock_init(void)
 void lock_resume(void)
 {
     lock_esp_init(); // servo: duty 0 (no pulse), no move
+#if CONFIG_LOCK_BACKEND_SERVO && !CONFIG_LOCK_SERVO_RELEASE
+    // RELEASE=n holds the engaged pulse (and the rail) for good: a bolt that
+    // can be pushed back. Re-drive it — the servo is already at that
+    // position, so this restores the hold without a visible move.
+    lock_engage();
+#endif
 #if CONFIG_LOCK_BACKEND_RELAY
     // lock_esp_init presets the relay pin to the ACTIVE (release) level;
     // lock_init masks that with lock_engage(). A resume must drive the

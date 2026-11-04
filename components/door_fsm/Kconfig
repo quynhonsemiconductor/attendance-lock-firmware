@@ -34,11 +34,13 @@ config DOOR_EXIT_GPIO
 config DOOR_EXIT_DEBOUNCE_MS
     int "Exit button debounce (ms)"
     default 50
+    range 10 1000
     depends on DOOR_EXIT_GPIO >= 0
 
 config DOOR_EXIT_STUCK_S
     int "Exit button held this long counts as stuck (s)"
     default 60
+    range 5 3600
     depends on DOOR_EXIT_GPIO >= 0
     help
         A stuck button stops blocking deep sleep and is not armed as a wake

@@ -56,7 +56,12 @@ void sync_init(void);
 bool sync_busy(void);
 
 // RTC time (esp_rtc_get_time_us, µs) at which the next session is due: the
-// deep-sleep timer wake.
+// deep-sleep timer wake. Contract:
+// - only meaningful after sync_init() (before it, RTC memory is garbage);
+// - call it only after a successful sync_sleep_prepare(): the sync task
+//   writes the 64-bit value under the lock that call holds, so no torn read;
+// - UINT64_MAX = never due (sync failed to start): the caller must clamp the
+//   timer (main.c caps it at 24 h).
 uint64_t sync_next_due_rtc_us(void);
 
 // Blocks new sessions before deep sleep. False when one is running (stay

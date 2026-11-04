@@ -6,9 +6,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Monotonic microseconds since power-on. On the ESP32 this is esp_timer,
-// which the RTC timer (still counting in deep sleep) re-seeds on wake —
-// uptime is continuous across a deep-sleep cycle.
+// Monotonic microseconds, continuous across a deep-sleep cycle. ESP32:
+// with SLEEP_DEEP_ENABLE the RTC counter (esp_rtc_get_time_us), which keeps
+// running through deep sleep; otherwise esp_timer (no deep sleep, so the
+// question does not arise). Both restart on power-on; whether a soft
+// restart resets them does not matter — clock_init() starts a new segment
+// on every non-deep-sleep boot and keeps the old base one slot back.
 int64_t clock_port_uptime_us(void);
 
 // The persisted clock state — ONE definition shared by clock.c (logic) and
@@ -44,10 +47,10 @@ typedef enum {
 clock_port_res_t clock_port_state_load(void *out, size_t cap, size_t *len);
 bool clock_port_state_store(const void *buf, size_t len);
 
-// True only when the device resumed from deep sleep (the RTC-backed
-// esp_timer kept counting, so stored uptime deltas stay valid). False after
-// power-on and after panic/watchdog/esp_restart — there esp_timer restarted
-// at 0 and every stored uptime delta is stale.
+// True only when the device resumed from deep sleep (clock_port_uptime_us
+// kept counting, so stored uptime deltas stay valid). False after power-on
+// and after panic/watchdog/esp_restart — clock_init() then treats every
+// stored uptime delta as stale and starts a new segment.
 bool clock_port_deep_sleep_wake(void);
 
 // Wall-clock epoch seconds from the system clock (set by SNTP behind the
