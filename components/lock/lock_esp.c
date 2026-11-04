@@ -7,6 +7,9 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "lock/lock_math.h"
 
@@ -16,19 +19,66 @@ static const char *TAG = "lock";
 static esp_timer_handle_t s_release_timer;
 
 #if CONFIG_LOCK_BACKEND_SERVO
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
+// Servo power switch (2026-11-03): EN -> P-MOSFET high side on the 6 V.
+static volatile bool s_pwr_on;
+
+static void servo_power(bool on)
+{
+    gpio_set_level(CONFIG_LOCK_SERVO_PWR_GPIO,
+                   on ? CONFIG_LOCK_SERVO_PWR_ACTIVE : !CONFIG_LOCK_SERVO_PWR_ACTIVE);
+    s_pwr_on = on;
+}
+#endif
+
+// Release deadline: esp_timer_stop() cannot recall a release callback the
+// esp_timer task has already dispatched (it may run late, on the other
+// core). Each release records WHEN it is due; a move clears it. A callback
+// acts only once the current deadline has passed, so a stale callback of an
+// older move — before or after the new move re-armed — finds either no
+// deadline or one still in the future, and leaves the new pulse and the
+// rail alone. Deadline, check and release writes share s_move_lock.
+// A mutex, not a spinlock: ledc_set_duty may block (fade semaphore), and the
+// callback runs in the esp_timer task, where a short block is allowed.
+static StaticSemaphore_t s_move_lock_buf;
+static SemaphoreHandle_t s_move_lock;
+static int64_t s_release_at_us = LOCK_NO_RELEASE;
+
 static void release_cb(void *arg)
 {
     (void)arg;
-    // No pulse = no holding current (and no hum). The bolt position is
-    // mechanical; a bolt that can be pushed back sets LOCK_SERVO_RELEASE=n.
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    xSemaphoreTake(s_move_lock, portMAX_DELAY);
+    if (lock_release_due(esp_timer_get_time(), s_release_at_us)) { // host-tested
+        s_release_at_us = LOCK_NO_RELEASE;
+        // No pulse = no holding current (and no hum). The bolt position is
+        // mechanical; a bolt that can be pushed back sets LOCK_SERVO_RELEASE=n.
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
+        servo_power(false); // pulse first, then the rail: no half-powered twitch
+#endif
+    }
+    xSemaphoreGive(s_move_lock);
 }
 #endif
 
 void lock_esp_init(void)
 {
 #if CONFIG_LOCK_BACKEND_SERVO
+    s_move_lock = xSemaphoreCreateMutexStatic(&s_move_lock_buf); // static: cannot fail
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
+    // Off before the pin turns into an output (the board's pull keeps the
+    // MOSFET off until then): the boot engage powers it on for its move.
+    gpio_set_level(CONFIG_LOCK_SERVO_PWR_GPIO, !CONFIG_LOCK_SERVO_PWR_ACTIVE);
+    gpio_config_t pwr = {
+        .pin_bit_mask = 1ULL << CONFIG_LOCK_SERVO_PWR_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    if (gpio_config(&pwr) != ESP_OK) {
+        ESP_LOGE(TAG, "servo power EN GPIO%d config failed", CONFIG_LOCK_SERVO_PWR_GPIO);
+    }
+    servo_power(false);
+#endif
     ledc_timer_config_t timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_14_BIT,
@@ -64,7 +114,7 @@ void lock_esp_init(void)
     // The output register is set to the ENGAGED level BEFORE the pin turns
     // into an output: an active-low relay would otherwise see the default
     // low level as a command glitch at boot. Boot = engaged is §2.8 anyway.
-    gpio_set_level(CONFIG_LOCK_RELAY_GPIO, CONFIG_LOCK_RELAY_ACTIVE ? 1 : 0);
+    gpio_set_level(CONFIG_LOCK_RELAY_GPIO, CONFIG_LOCK_RELAY_ACTIVE ? 0 : 1); // engaged = inactive
     gpio_config_t io = {
         .pin_bit_mask = 1ULL << CONFIG_LOCK_RELAY_GPIO,
         .mode = GPIO_MODE_OUTPUT,
@@ -92,6 +142,29 @@ void lock_esp_servo_write(uint32_t pulse_us)
     // there, not twice.
     uint32_t duty =
         lock_servo_duty_ticks(pulse_us, CONFIG_LOCK_SERVO_FREQ, 14);
+    // A pending release of the previous move must not zero this pulse or
+    // cut this move's power: stop it, and clear its deadline in case it
+    // already fired (lock_esp_servo_release_after re-arms for this move).
+    if (s_release_timer != NULL) {
+        esp_timer_stop(s_release_timer);
+    }
+    xSemaphoreTake(s_move_lock, portMAX_DELAY);
+    s_release_at_us = LOCK_NO_RELEASE;
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0
+    bool power_up = !s_pwr_on;
+    if (power_up) {
+        servo_power(true);
+    }
+#endif
+    xSemaphoreGive(s_move_lock);
+#if CONFIG_LOCK_SERVO_PWR_GPIO >= 0 && CONFIG_LOCK_SERVO_PWR_LEAD_MS > 0
+    if (power_up) {
+        // pdMS_TO_TICKS rounds down: a lead shorter than one tick would
+        // become a 0-tick delay and skip the rail settle time entirely.
+        const TickType_t lead = pdMS_TO_TICKS(CONFIG_LOCK_SERVO_PWR_LEAD_MS);
+        vTaskDelay(lead ? lead : 1);
+    }
+#endif
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
@@ -102,6 +175,11 @@ void lock_esp_servo_release_after(uint32_t move_ms)
         return;
     }
     esp_timer_stop(s_release_timer); // restartable: engage→release→engage
+    xSemaphoreTake(s_move_lock, portMAX_DELAY);
+    // The timer fires at or after its period, never before: the real
+    // callback always finds now >= the deadline.
+    s_release_at_us = esp_timer_get_time() + (int64_t)move_ms * 1000;
     esp_timer_start_once(s_release_timer, (uint64_t)move_ms * 1000);
+    xSemaphoreGive(s_move_lock);
 }
 #endif

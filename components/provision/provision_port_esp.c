@@ -8,6 +8,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -106,6 +107,24 @@ bool provision_port_allow_http(void)
 // the LF that starts the next line.
 static bool skip_lf;
 
+// Written by the console task, read by the door task (possibly on the
+// other core): both sides go through s_input_mux, so the pair is consistent.
+static portMUX_TYPE s_input_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_input_seen;
+static uint32_t s_input_ms;
+
+bool provision_console_last_input(uint32_t *last_ms)
+{
+    // seen == true always comes with its timestamp (never the boot-time 0,
+    // which would read as long idle and let the chip sleep mid-typing).
+    portENTER_CRITICAL(&s_input_mux);
+    bool seen = s_input_seen;
+    uint32_t ms = s_input_ms;
+    portEXIT_CRITICAL(&s_input_mux);
+    *last_ms = seen ? ms : 0;
+    return seen;
+}
+
 static size_t read_line(char *buf, size_t cap)
 {
     size_t n = 0;
@@ -116,6 +135,11 @@ static size_t read_line(char *buf, size_t cap)
             vTaskDelay(pdMS_TO_TICKS(20)); // between characters: yield
             continue;
         }
+        uint32_t input_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        portENTER_CRITICAL(&s_input_mux);
+        s_input_ms = input_ms;
+        s_input_seen = true;
+        portEXIT_CRITICAL(&s_input_mux);
         if (c == '\r' || c == '\n') {
             if (c == '\n' && n == 0 && skip_lf) {
                 skip_lf = false; // the LF of a CR LF pair

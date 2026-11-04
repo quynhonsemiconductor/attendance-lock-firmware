@@ -121,6 +121,40 @@ bool door_fsm_released(const door_fsm_t *fsm)
     return fsm->released;
 }
 
+bool door_fsm_idle(const door_fsm_t *fsm, uint32_t now_ms)
+{
+    if (fsm->released || fsm->beeps_left > 0 || fsm->beep_on) {
+        return false;
+    }
+    return fsm->red_until_ms == 0 || (int32_t)(fsm->red_until_ms - now_ms) <= 0;
+}
+
+void door_exit_init(door_exit_t *b)
+{
+    b->raw = false;
+    b->raw_since_ms = 0;
+    b->down = false;
+}
+
+bool door_exit_update(door_exit_t *b, bool pressed, uint32_t now_ms, uint32_t debounce_ms)
+{
+    if (pressed != b->raw) {
+        b->raw = pressed;
+        b->raw_since_ms = now_ms;
+    }
+    // Unsigned subtraction: wrap-safe across the ~49-day ms clock.
+    if (b->down != b->raw && (uint32_t)(now_ms - b->raw_since_ms) >= debounce_ms) {
+        b->down = b->raw;
+        return b->down;
+    }
+    return false;
+}
+
+bool door_exit_stuck(const door_exit_t *b, uint32_t now_ms, uint32_t stuck_ms)
+{
+    return b->raw && (uint32_t)(now_ms - b->raw_since_ms) >= stuck_ms;
+}
+
 const char *door_decision_name(door_decision_t d)
 {
     switch (d) {

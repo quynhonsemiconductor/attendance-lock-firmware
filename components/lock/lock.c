@@ -19,6 +19,23 @@ void lock_init(void)
     lock_engage(); // fail-secure boot state (§2.8)
 }
 
+void lock_resume(void)
+{
+    lock_esp_init(); // servo: duty 0 (no pulse), no move
+#if CONFIG_LOCK_BACKEND_SERVO && !CONFIG_LOCK_SERVO_RELEASE
+    // RELEASE=n holds the engaged pulse (and the rail) for good: a bolt that
+    // can be pushed back. Re-drive it — the servo is already at that
+    // position, so this restores the hold without a visible move.
+    lock_engage();
+#endif
+#if CONFIG_LOCK_BACKEND_RELAY
+    // lock_esp_init already presets the engaged (inactive) level before the
+    // pin turns into an output; driving it again is explicit fail-secure
+    // (§2.8) and not a move.
+    lock_esp_relay_write(0);
+#endif
+}
+
 void lock_engage(void)
 {
 #if CONFIG_LOCK_BACKEND_SERVO

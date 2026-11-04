@@ -10,3 +10,36 @@ CONFIG_NVS_ENCRYPTION=n
 # board can sync against a local opshub (docs/BENCH-TEST.md §7). The prod
 # profile keeps this unset — https:// only (asserted in CI).
 CONFIG_PROVISION_ALLOW_HTTP=y
+
+# Bench board (battery work 2026-11-01, pins swapped 2026-11-03): AM312 PIRs
+# gate the card polls and wake the chip from deep sleep. Outside PIR on KSCL
+# -> GPIO18, inside PIR on KSDA -> GPIO8 (both RTC GPIOs: ext1 wakeup).
+# Prod keeps the default -1 (no PIR: poll every READER_POLL_MS, no deep
+# sleep) until the PIRs are on the production PCB.
+CONFIG_READER_PIR_GPIO=18
+CONFIG_READER_PIR2_GPIO=8
+CONFIG_READER_PIR_DEBUG=y
+# Awake (and fast scanning) for 3 s after the last motion, then deep sleep.
+CONFIG_READER_PIR_ACTIVE_MS=3000
+CONFIG_SLEEP_DEEP_ENABLE=y
+# Deep-sleep wake latency: skip the app image re-verify on a deep-sleep wake
+# (bench only; not available with secure boot, the prod profile).
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+
+# Main board KEY1 (2026-11-03): inside exit button on GPIO6, active low
+# (10k pull-up + 100 nF), wakes the chip from deep sleep (ext0). Bench only:
+# SECURITY.md keeps egress mechanical, prod stays -1 until that is revisited.
+CONFIG_DOOR_EXIT_GPIO=6
+# Servo power switch board (pcb/servo-power-switch): EN on GPIO14, high = on.
+# The servo rail is on only for a move (and held off through deep sleep).
+CONFIG_LOCK_SERVO_PWR_GPIO=14
+CONFIG_LOCK_SERVO_PWR_ACTIVE=1
+
+# Battery divider on the bench board (2026-11-03): 100k top / 47k bottom,
+# pack mV = pin mV x 147 / 47 (~41 uA from a 6 V pack; a fresh 6.5 V pack
+# puts 2.08 V on GPIO1, inside the 12 dB ADC range).
+CONFIG_POWER_BATTERY_DIV_MUL=147
+CONFIG_POWER_BATTERY_DIV_DIV=47
+# Sync every 2 h: ~12 Wi-Fi sessions a day. A new card or a revoked one
+# reaches the lock within 2 h; taps upload within 2 h.
+CONFIG_SYNC_INTERVAL_MIN=120

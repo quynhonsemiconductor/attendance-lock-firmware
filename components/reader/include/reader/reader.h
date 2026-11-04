@@ -52,6 +52,54 @@ bool reader_uid_confirmed(const uint8_t *first, const uint8_t *second, uint8_t u
 // mismatch). Monotonic; the sync port reports the per-session delta.
 uint32_t reader_misread_count(void);
 
+// PIR-gated poll cadence (battery work 2026-11-01). Host-testable: given the
+// PIR level now and when motion was last seen, decide whether the readers are
+// in the fast window (poll every poll_ms: the 1 s tap-to-read target) or idle
+// (fallback poll every idle_ms). motion_seen = false means no motion since
+// boot. The fast window lasts active_ms past the last high level, so a person
+// who stops moving while finding the card is still read within 1 s.
+typedef struct {
+    bool fast;        // inside the motion window
+    uint32_t wait_ms; // delay before the next poll (a PIR edge cuts it short)
+} reader_scan_plan_t;
+
+reader_scan_plan_t reader_scan_plan(uint32_t now_ms, bool pir_high, bool motion_seen,
+                                    uint32_t last_motion_ms, uint32_t active_ms,
+                                    uint32_t poll_ms, uint32_t idle_ms);
+
+// PIR rising edges seen since boot (0 without a PIR). Monotonic.
+uint32_t reader_pir_wake_count(void);
+
+// A PIR that has been high for stuck_ms without a break is treated as
+// faulty (wiring, a heat source in view): it no longer counts as motion and
+// is left out of the deep-sleep wake mask, so one bad sensor cannot keep
+// the door awake (and the battery draining) forever. Host-testable.
+bool reader_pir_stuck(bool high, uint32_t high_since_ms, uint32_t now_ms, uint32_t stuck_ms);
+
+// Presence snapshot for the deep-sleep gate (battery work 2026-11-03).
+typedef struct {
+    bool any_high;           // a usable (not stuck) PIR is high, or its ISR
+                             // fired and the reader task has not looked yet
+    bool motion_seen;        // any motion (PIR or a card) since boot/wake
+    uint32_t last_motion_ms; // uptime ms of the last motion
+    uint64_t wake_mask;      // GPIO mask of the usable PIRs (ext1 wakeup)
+    bool pir_dropped;        // a configured PIR is stuck and left out of
+                             // wake_mask: the sleep must use the fallback timer
+} reader_presence_t;
+
+void reader_presence(reader_presence_t *out);
+
+// Stops the poll task between two polls (both readers left in hard
+// power-down) before deep sleep. Waits up to timeout_ms for a running poll
+// to finish. False = the poll did not finish in time (stay awake, try again
+// later).
+bool reader_sleep_prepare(uint32_t timeout_ms);
+
+// Undoes a successful reader_sleep_prepare() when the sleep is called off
+// after it (a tap landed during the last poll pass): re-enables the PIR
+// interrupts that were armed and lets the poll task run again.
+void reader_sleep_cancel(void);
+
 #ifdef __cplusplus
 }
 #endif

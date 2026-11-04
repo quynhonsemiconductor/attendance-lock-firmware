@@ -9,6 +9,11 @@
 // Register the provisioning console on the serial line (inside the enclosure).
 void provision_init(void);
 
+// Console activity for the deep-sleep gate (battery work 2026-11-03): true
+// once any character arrived since boot; *last_ms = uptime ms of the last
+// one. A person typing keeps the chip awake.
+bool provision_console_last_input(uint32_t *last_ms);
+
 // True when a base URL and token are stored (encrypted NVS, prod profile).
 bool provisioned(void);
 
