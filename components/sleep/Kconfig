@@ -1,0 +1,35 @@
+menu "Deep sleep"
+
+config SLEEP_DEEP_ENABLE
+    bool "Deep sleep between PIR wakes and sync sessions"
+    default n
+    depends on READER_PIR_GPIO >= 0
+    help
+        Battery work 2026-11-03. With the bolt engaged, no feedback running,
+        no sync session due and no motion for READER_PIR_ACTIVE_MS, the chip
+        enters deep sleep. It wakes on a PIR going high (ext1, any of the
+        configured PIRs) or on the RTC timer when the next sync session is
+        due. A wake restarts the firmware: the bolt is NOT driven again
+        (it stayed engaged), the allow-list and the event ring come from
+        NVS, the clock base and the sync schedule from RTC memory.
+
+        There is no fallback poll while asleep: a covered PIR means a card
+        is not read until someone moves in front of it.
+
+config SLEEP_BOOT_AWAKE_S
+    int "Stay awake after power-on / reset (s): provisioning console window"
+    default 120
+    range 10 3600
+    depends on SLEEP_DEEP_ENABLE
+    help
+        The UART console only answers while the chip is awake. After a
+        power-on or a reset (EN button) it stays awake this long; console
+        input keeps it awake for SLEEP_CONSOLE_IDLE_S more.
+
+config SLEEP_CONSOLE_IDLE_S
+    int "Console input keeps the chip awake this long (s)"
+    default 60
+    range 5 3600
+    depends on SLEEP_DEEP_ENABLE
+
+endmenu

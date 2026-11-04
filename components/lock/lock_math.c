@@ -12,3 +12,8 @@ uint32_t lock_servo_duty_ticks(uint32_t pulse_us, uint32_t freq_hz, uint32_t res
     uint64_t ticks = ((uint64_t)pulse_us * max_ticks + period_us / 2) / period_us;
     return ticks > max_ticks ? max_ticks : (uint32_t)ticks;
 }
+
+bool lock_release_due(int64_t now_us, int64_t release_at_us)
+{
+    return release_at_us != LOCK_NO_RELEASE && now_us >= release_at_us;
+}

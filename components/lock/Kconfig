@@ -45,4 +45,32 @@ config LOCK_SERVO_RELEASE
     bool "Release the servo signal after the move (no holding current)"
     default y
 
+config LOCK_SERVO_PWR_GPIO
+    int "Servo power switch enable GPIO (-1 = servo always powered)"
+    default -1
+    range -1 48
+    depends on LOCK_BACKEND_SERVO
+    help
+        Servo power switch board (pcb/servo-power-switch, 2026-11-03): EN on
+        GPIO14 drives a P-MOSFET high-side switch on the servo's 6 V. The
+        servo is powered only for a move: EN on, LOCK_SERVO_PWR_LEAD_MS for
+        the rail to come up, the pulse, then pulse AND power off after
+        LOCK_SERVO_MOVE_MS. With LOCK_SERVO_RELEASE=n the power stays on
+        while the chip is awake (the held pulse needs it). Deep sleep has no
+        PWM, so there is no pulse to hold: EN is held off through deep sleep
+        in every mode, and lock_resume() re-drives the held pulse (and the
+        rail) on the wake.
+
+config LOCK_SERVO_PWR_ACTIVE
+    int "Servo power enable active level (1 = high turns the servo on)"
+    default 1
+    range 0 1
+    depends on LOCK_SERVO_PWR_GPIO >= 0
+
+config LOCK_SERVO_PWR_LEAD_MS
+    int "Servo power-up time before the pulse starts (ms)"
+    default 20
+    range 0 200
+    depends on LOCK_SERVO_PWR_GPIO >= 0
+
 endmenu
