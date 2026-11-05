@@ -110,6 +110,11 @@ static bool s_last_low_battery;
 static bool s_battery_valid;
 static bool s_battery_fault; // reading exists but cannot be a pack voltage
 
+#ifdef DOOR_MASTER_UID_HEX
+static uint8_t s_master_uid[4];
+static bool s_master_ok;
+#endif
+
 // Refresh the cached reading. Servo must be IDLE here: the move surge sags
 // the rail and would read a false low (false deny). The raw reading is
 // cached even when it is implausible, so the release gate sees the fault.
@@ -143,6 +148,13 @@ static void handle_tap(const door_msg_t *msg)
     }
     door_decision_t d = door_decide(s_cards[s_active], s_n_cards[s_active], synced, stamp,
                                     msg->uid, msg->uid_len);
+#ifdef DOOR_MASTER_UID_HEX
+    if (d == DOOR_DENY_UNKNOWN && s_master_ok &&
+        door_master_match(s_master_uid, msg->uid, msg->uid_len)) {
+        d = DOOR_ALLOW;
+        ESP_LOGW(TAG, "DEV master card -- allow-list bypassed");
+    }
+#endif
     if (d == DOOR_ALLOW && battery_deny(battery_mv)) {
         d = DOOR_DENY_BATTERY; // the surge would brown the rail out — stay locked
     }
@@ -517,6 +529,13 @@ void app_main(void)
     // here; the reader and door tasks subscribe themselves.
 
     door_fsm_init(&s_fsm, CONFIG_DOOR_UNLOCK_HOLD_MS);
+#ifdef DOOR_MASTER_UID_HEX
+    s_master_ok = door_master_parse(DOOR_MASTER_UID_HEX, s_master_uid);
+    if (s_master_ok) {
+        ESP_LOGW(TAG, "DEV master card loaded: %02X%02X%02X%02X",
+                 s_master_uid[0], s_master_uid[1], s_master_uid[2], s_master_uid[3]);
+    }
+#endif
     if (s_battery_fault) {
         // Same red fault pattern a reader fault shows (2 s): the pack
         // reading is unusable, which is a fault, not a battery level.
