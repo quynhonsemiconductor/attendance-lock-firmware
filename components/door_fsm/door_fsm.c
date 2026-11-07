@@ -34,6 +34,34 @@ door_decision_t door_decide(const store_card_t *cards, size_t n_cards, bool cloc
     return DOOR_ALLOW;
 }
 
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+bool door_master_parse(const char *hex, uint8_t uid[4])
+{
+    if (!hex) return false;
+    uint8_t tmp[4];
+    for (int i = 0; i < 4; i++) {
+        int hi = hex_nibble(hex[i * 2]);
+        int lo = hex_nibble(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        tmp[i] = (uint8_t)((hi << 4) | lo);
+    }
+    if (hex[8] != '\0') return false;
+    memcpy(uid, tmp, 4);
+    return true;
+}
+
+bool door_master_match(const uint8_t master[4], const uint8_t *uid, uint8_t uid_len)
+{
+    return uid_len == 4 && memcmp(master, uid, 4) == 0;
+}
+
 void door_fsm_init(door_fsm_t *fsm, uint32_t hold_ms)
 {
     memset(fsm, 0, sizeof(*fsm));

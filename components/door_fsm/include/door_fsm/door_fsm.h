@@ -73,6 +73,14 @@ bool door_fsm_idle(const door_fsm_t *fsm, uint32_t now_ms);
 
 const char *door_decision_name(door_decision_t d);
 
+// --- dev master card (build-time only) -----------------------------------
+// Parse an 8-digit hex string (case-insensitive) into 4 raw bytes.
+// Returns false on any invalid input without modifying uid.
+bool door_master_parse(const char *hex, uint8_t uid[4]);
+
+// True when uid_len == 4 and all 4 bytes match master.
+bool door_master_match(const uint8_t master[4], const uint8_t *uid, uint8_t uid_len);
+
 // --- exit button (KEY1 on GPIO6, active low; 2026-11-03) ---------------
 // Debounce for the inside exit button, sampled at the door task's 50 ms
 // cadence. A press opens like an allowed tap (door_fsm_apply(DOOR_ALLOW)),

@@ -1,0 +1,8 @@
+# Dev-bench master card - copy this file to master_card.local (git-ignored)
+# and put ONE card UID on its own line below.
+#
+# - Exactly 8 hex digits = a 4-byte UID, in the order the RC522 log and
+#   opshub show it, e.g. 04A1B2C3. With DoiMaTheNFC.exe and a USB reader
+#   this is usually the "Dao byte" (reversed) column.
+# - Spaces are ignored ("04 A1 B2 C3" works). Lines starting with # are
+#   comments. No UID line = no master card.

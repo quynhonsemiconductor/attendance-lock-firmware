@@ -268,6 +268,43 @@ static void test_exit_stuck_after_hold(void)
     TEST_ASSERT_FALSE(door_exit_stuck(&b, 200000, 60000)); // released: not stuck
 }
 
+// --- dev master card: parse + match --------------------------------------
+
+static void test_master_parse_valid(void)
+{
+    uint8_t uid[4] = { 0 };
+    TEST_ASSERT_TRUE(door_master_parse("04A1B2C3", uid));
+    TEST_ASSERT_EQUAL_HEX8(0x04, uid[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xA1, uid[1]);
+    TEST_ASSERT_EQUAL_HEX8(0xB2, uid[2]);
+    TEST_ASSERT_EQUAL_HEX8(0xC3, uid[3]);
+    // lowercase
+    TEST_ASSERT_TRUE(door_master_parse("deadbeef", uid));
+    TEST_ASSERT_EQUAL_HEX8(0xDE, uid[0]);
+}
+
+static void test_master_parse_rejects_bad_input(void)
+{
+    uint8_t uid[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+    TEST_ASSERT_FALSE(door_master_parse("04A1B2", uid));   // too short
+    TEST_ASSERT_FALSE(door_master_parse("04A1B2C3FF", uid)); // too long
+    TEST_ASSERT_FALSE(door_master_parse("04A1B2GG", uid)); // non-hex
+    TEST_ASSERT_FALSE(door_master_parse(NULL, uid));
+    TEST_ASSERT_EQUAL_HEX8(0xFF, uid[0]); // unchanged on failure
+}
+
+static void test_master_match_exact_only(void)
+{
+    uint8_t master[4] = { 0x04, 0xA1, 0xB2, 0xC3 };
+    uint8_t uid4[4] = { 0x04, 0xA1, 0xB2, 0xC3 };
+    TEST_ASSERT_TRUE(door_master_match(master, uid4, 4));
+    uid4[3] = 0xC4;
+    TEST_ASSERT_FALSE(door_master_match(master, uid4, 4));
+    // 7-byte UID starting with the same 4 bytes: must not match.
+    uint8_t uid7[7] = { 0x04, 0xA1, 0xB2, 0xC3, 0x00, 0x00, 0x00 };
+    TEST_ASSERT_FALSE(door_master_match(master, uid7, 7));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -290,5 +327,8 @@ int main(void)
     RUN_TEST(test_exit_bounce_shorter_than_debounce_ignored);
     RUN_TEST(test_exit_debounce_survives_ms_clock_wrap);
     RUN_TEST(test_exit_stuck_after_hold);
+    RUN_TEST(test_master_parse_valid);
+    RUN_TEST(test_master_parse_rejects_bad_input);
+    RUN_TEST(test_master_match_exact_only);
     return UNITY_END();
 }

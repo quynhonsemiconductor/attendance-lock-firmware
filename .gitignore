@@ -1,5 +1,6 @@
 # Secrets — KHONG commit
 secrets.h
+master_card.local
 
 # Builds
 build*/

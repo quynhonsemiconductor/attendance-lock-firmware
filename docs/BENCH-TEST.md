@@ -291,3 +291,20 @@ provisions a plain-http base URL; against a deployed opshub always use
    session. When the ring holds more than 100 events, one session drains it
    in back-to-back batches (≤100 each, 60 s budget) until the queue is
    empty.
+
+### Dev master card
+
+A build-time-only bypass for bench testing without an opshub allow-list.
+
+1. Copy `master_card.local.example` to `master_card.local` in the project
+   root and put your 4-byte UID (8 hex digits) on its own line.
+2. Rebuild the dev profile (`idf.py -B build-dev build`). The configure log
+   prints `Dev master card UID: <hex>`.
+3. Flash and tap the master card. Expected log:
+   `DEV master card -- allow-list bypassed` followed by the allow feedback
+   (single beep, green LED, servo release / relay click).
+4. Any other card still logs `deny (unknown-card)`.
+5. The battery deny gate still applies: if the pack is below
+   `POWER_BATTERY_LOW_MV` the master card is also denied (`low-battery`).
+6. **Production safety**: the build fails if `master_card.local` exists and
+   Secure Boot or Flash Encryption is enabled.
