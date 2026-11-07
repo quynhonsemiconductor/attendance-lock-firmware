@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/quynhonsemiconductor/attendance-lock-firmware/compare/v0.3.0...v0.4.0) (2026-11-07)
+
+
+### Features
+
+* **door:** dev-only master card from master_card.local ([#41](https://github.com/quynhonsemiconductor/attendance-lock-firmware/issues/41)) ([7c0a6ac](https://github.com/quynhonsemiconductor/attendance-lock-firmware/commit/7c0a6ac4a280e641310ac23fb6b4fb5a69770bf6))
+
 ## [0.3.0](https://github.com/quynhonsemiconductor/attendance-lock-firmware/compare/v0.2.0...v0.3.0) (2026-11-04)
 
 
